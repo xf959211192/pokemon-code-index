@@ -37,6 +37,7 @@
       <label>管理员令牌<input id="token" type="password" placeholder="ADMIN_TOKEN" /></label>
       <button id="saveToken">保存令牌</button>
       <a class="button" href="/">返回首页</a>
+      <button id="checkHealth" class="secondary">检查服务状态</button>
       <button id="reloadAll" class="secondary">刷新后台数据</button>
     </section>
 
@@ -204,6 +205,14 @@
     });
 
     el("reloadAll").addEventListener("click", reloadAll);
+
+    el("checkHealth").addEventListener("click", async () => {
+      try {
+        output(await read("/api/health"));
+      } catch (error) {
+        output({ ok: false, message: error.message });
+      }
+    });
 
     el("refresh").addEventListener("click", async () => {
       try {

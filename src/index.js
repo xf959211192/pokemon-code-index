@@ -26,6 +26,32 @@ function inAutoWindow(date = new Date()) {
   return day >= 1 && day <= 7;
 }
 
+async function buildHealth(env, now = new Date()) {
+  const period = periodOf(now);
+  try {
+    const row = await env.DB.prepare(`
+      SELECT EXISTS(
+        SELECT 1 FROM codes WHERE period = ? AND status = 'verified' LIMIT 1
+      ) AS has_verified
+    `).bind(period).first();
+    return {
+      ok: true,
+      period,
+      database: "reachable",
+      autoWindow: inAutoWindow(now),
+      hasVerifiedCodeThisMonth: Boolean(row?.has_verified)
+    };
+  } catch {
+    return {
+      ok: false,
+      period,
+      database: "unreachable",
+      autoWindow: inAutoWindow(now),
+      hasVerifiedCodeThisMonth: false
+    };
+  }
+}
+
 function decodeHtml(text = "") {
   return text
     .replace(/&nbsp;/gi, " ")
@@ -286,8 +312,18 @@ async function refresh(env, { force = false, triggerType = "manual", topicUrl = 
   return { ok: true, message, period, ...verified, candidates };
 }
 
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 function authorized(request, env) {
-  return Boolean(env.ADMIN_TOKEN) && request.headers.get("Authorization") === `Bearer ${env.ADMIN_TOKEN}`;
+  const expected = env.ADMIN_TOKEN ? `Bearer ${env.ADMIN_TOKEN}` : "";
+  const actual = request.headers.get("Authorization") ?? "";
+  if (!expected || actual.length !== expected.length) return false;
+  return constantTimeEqual(actual, expected);
 }
 
 async function body(request) {
@@ -314,31 +350,42 @@ async function manual(env, data) {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === "/api/latest" && request.method === "GET") return json(await latest(env), 200, { "Cache-Control": "public, max-age=300" });
-    if (url.pathname === "/api/history" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT * FROM codes ORDER BY period DESC LIMIT 24`).all()).results });
-    if (url.pathname === "/api/public-links" && request.method === "GET") return json({ officialChannel: OFFICIAL_CHANNEL_URL, officialGroup: OFFICIAL_GROUP_URL }, 200, { "Cache-Control": "public, max-age=3600" });
-    if (url.pathname.startsWith("/api/admin/") && !authorized(request, env)) return json({ ok: false, message: "管理员令牌错误" }, 401);
-    if (url.pathname === "/api/admin/refresh" && request.method === "POST") {
-      const data = await body(request);
-      const result = await refresh(env, { force: true, triggerType: "manual_refresh", topicUrl: data.topicUrl || null });
-      return json(result, result.ok ? 200 : 422);
+    try {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/health" && request.method === "GET") {
+        const health = await buildHealth(env);
+        return json(health, health.ok ? 200 : 500, { "Cache-Control": "no-store" });
+      }
+      if (url.pathname === "/api/latest" && request.method === "GET") return json(await latest(env), 200, { "Cache-Control": "public, max-age=300" });
+      if (url.pathname === "/api/history" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT * FROM codes ORDER BY period DESC LIMIT 24`).all()).results });
+      if (url.pathname === "/api/public-links" && request.method === "GET") return json({ officialChannel: OFFICIAL_CHANNEL_URL, officialGroup: OFFICIAL_GROUP_URL }, 200, { "Cache-Control": "public, max-age=3600" });
+      if (url.pathname.startsWith("/api/admin/") && !(await authorized(request, env))) return json({ ok: false, message: "管理员令牌错误" }, 401);
+      if (url.pathname === "/api/admin/refresh" && request.method === "POST") {
+        const data = await body(request);
+        const result = await refresh(env, { force: true, triggerType: "manual_refresh", topicUrl: data.topicUrl || null });
+        return json(result, result.ok ? 200 : 422);
+      }
+      if (url.pathname === "/api/admin/manual" && request.method === "POST") {
+        try { return json(await manual(env, await body(request))); }
+        catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
+      }
+      if (url.pathname === "/api/admin/logs" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
+      if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: periodOf(), items: await listCandidates(env, periodOf()) });
+      if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
+      if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
+        const data = await body(request);
+        const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`).bind(data.enabled ? 1 : 0, String(data.sourceKey ?? "")).run();
+        return json({ ok: Boolean(result.meta?.changes), sourceKey: data.sourceKey, enabled: Boolean(data.enabled) });
+      }
+      return env.ASSETS.fetch(request);
+    } catch (error) {
+      console.error("request_failed", error instanceof Error ? error.message : String(error));
+      return json({ ok: false, message: "服务暂时异常，请稍后再试" }, 500);
     }
-    if (url.pathname === "/api/admin/manual" && request.method === "POST") {
-      try { return json(await manual(env, await body(request))); }
-      catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
-    }
-    if (url.pathname === "/api/admin/logs" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
-    if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: periodOf(), items: await listCandidates(env, periodOf()) });
-    if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
-    if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
-      const data = await body(request);
-      const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`).bind(data.enabled ? 1 : 0, String(data.sourceKey ?? "")).run();
-      return json({ ok: Boolean(result.meta?.changes), sourceKey: data.sourceKey, enabled: Boolean(data.enabled) });
-    }
-    return env.ASSETS.fetch(request);
   },
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(refresh(env, { force: false, triggerType: `cron:${controller.cron}` }));
   }
 };
+
+export { buildHealth, inAutoWindow, periodOf, verifiedFrom };

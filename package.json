@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test",
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute pokemon-code-index --local --file=./schema.sql",

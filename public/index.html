@@ -71,6 +71,18 @@
       el("warning").style.display = "block";
     }
 
+    async function readJson(path) {
+      const response = await fetch(path);
+      let data = null;
+      try { data = await response.json(); } catch {}
+      if (!response.ok) {
+        const error = new Error(data?.message || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
     function verificationLabel(title = "") {
       if (title.includes("官方 Telegram")) return "官方明确发布";
       if (title.includes("多来源")) return "多来源交叉验证";
@@ -82,8 +94,8 @@
     async function load() {
       try {
         const [data, links] = await Promise.all([
-          fetch("/api/latest").then((res) => res.json()),
-          fetch("/api/public-links").then((res) => res.json())
+          readJson("/api/latest"),
+          readJson("/api/public-links")
         ]);
 
         if (links.officialChannel) el("officialChannel").href = links.officialChannel;
@@ -91,7 +103,7 @@
 
         if (!data.found || !data.item) {
           el("code").textContent = "暂未找到";
-          renderWarning("本月尚未收集到可展示的兑换码。管理员可在管理页手动刷新或补录。 ");
+          renderWarning("本月兑换码暂未收集到");
           return;
         }
 
@@ -120,7 +132,13 @@
         }
       } catch (error) {
         el("code").textContent = "加载失败";
-        renderWarning("接口读取失败，请稍后重试。 ");
+        if (error.status === 429) {
+          renderWarning("服务暂时达到访问额度上限，请稍后再试");
+        } else if (error.status === 500) {
+          renderWarning("服务暂时异常，请稍后再试");
+        } else {
+          renderWarning("接口读取失败，请稍后重试。");
+        }
       }
     }
 

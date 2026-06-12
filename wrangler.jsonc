@@ -1,13 +1,22 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pokemon-code-index",
-  "main": "src/index.js",
-  "compatibility_date": "2026-06-12",
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS"
-  },
-  "triggers": {
-    "crons": ["0 1 * * *"]
-  }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "pokemon-code-index",
+	"main": "src/index.js",
+	"compatibility_date": "2026-06-12",
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS"
+	},
+	"triggers": {
+		"crons": [
+			"0 1 * * *"
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "pokemon-code-index",
+			"database_id": "dfea5e76-c318-4c2b-a0d3-63ae09098ea5"
+		}
+	]
 }
