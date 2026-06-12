@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pokemon-code-index",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-12",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "triggers": {
+    "crons": ["0 1 * * *"]
+  }
+}
