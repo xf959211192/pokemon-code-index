@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>宝可梦每月兑换码</title>
+  <style>
+    :root { font-family: Inter, "Microsoft YaHei", sans-serif; color: #172033; background: #f3f7fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    main { width: min(700px, 100%); }
+    .card { background: #fff; border: 1px solid #e4ebf2; border-radius: 22px; padding: 28px; box-shadow: 0 14px 45px rgba(35, 55, 80, .08); }
+    .eyebrow { color: #607086; font-size: 13px; letter-spacing: .08em; margin: 0 0 10px; }
+    h1 { margin: 0; font-size: 28px; }
+    .desc { color: #68778d; line-height: 1.7; margin: 10px 0 24px; }
+    .code-box { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px; background: #f7faff; border: 1px solid #e0e9f4; border-radius: 16px; }
+    #code { font-size: 30px; font-weight: 800; letter-spacing: .04em; overflow-wrap: anywhere; }
+    button, .button { border: 0; border-radius: 12px; background: #172033; color: white; padding: 11px 15px; cursor: pointer; text-decoration: none; font-size: 14px; white-space: nowrap; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .meta { display: grid; gap: 9px; margin-top: 20px; color: #55657b; font-size: 14px; }
+    .meta-row { display: flex; justify-content: space-between; gap: 16px; }
+    .value { color: #263349; text-align: right; }
+    a { color: #315c98; }
+    .warn { margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: #fff8e5; color: #7e611b; line-height: 1.6; font-size: 14px; display: none; }
+    .links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    .links a { display: inline-block; border-radius: 999px; padding: 8px 11px; background: #eef4fb; text-decoration: none; font-size: 13px; }
+    .footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 18px; color: #728197; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <p class="eyebrow">MONTHLY CODE INDEX</p>
+      <h1>宝可梦每月兑换码</h1>
+      <p class="desc">每月 1 日至 7 日自动检查官方通知频道、LINUX DO 月度讨论帖和备用公开页面。发现当月兑换码后，本月停止重复抓取。</p>
+
+      <div class="code-box">
+        <span id="code">读取中...</span>
+        <button id="copy" disabled>复制</button>
+      </div>
+
+      <div id="warning" class="warn"></div>
+
+      <div class="meta">
+        <div class="meta-row"><span>对应月份</span><span id="period" class="value">--</span></div>
+        <div class="meta-row"><span>状态</span><span id="status" class="value">--</span></div>
+        <div class="meta-row"><span>验证方式</span><span id="verify" class="value">--</span></div>
+        <div class="meta-row"><span>更新时间</span><span id="updated" class="value">--</span></div>
+        <div class="meta-row"><span>来源</span><span id="source" class="value">--</span></div>
+      </div>
+
+      <div class="links">
+        <a id="officialChannel" href="https://t.me/s/pokemon521" target="_blank" rel="noreferrer">官方通知频道</a>
+        <a id="officialGroup" href="https://t.me/pokemon_love" target="_blank" rel="noreferrer">官方群组</a>
+      </div>
+
+      <div class="footer">
+        <span>仅聚合公开信息，请自行判断有效性。</span>
+        <a href="/admin.html">管理</a>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const copyButton = el("copy");
+    let latestCode = "";
+
+    function renderWarning(message) {
+      el("warning").textContent = message;
+      el("warning").style.display = "block";
+    }
+
+    function verificationLabel(title = "") {
+      if (title.includes("官方 Telegram")) return "官方明确发布";
+      if (title.includes("多来源")) return "多来源交叉验证";
+      if (title.includes("LINUX DO")) return "评论区社区共识";
+      if (title.includes("管理员")) return "管理员手动确认";
+      return title || "已确认";
+    }
+
+    async function load() {
+      try {
+        const [data, links] = await Promise.all([
+          fetch("/api/latest").then((res) => res.json()),
+          fetch("/api/public-links").then((res) => res.json())
+        ]);
+
+        if (links.officialChannel) el("officialChannel").href = links.officialChannel;
+        if (links.officialGroup) el("officialGroup").href = links.officialGroup;
+
+        if (!data.found || !data.item) {
+          el("code").textContent = "暂未找到";
+          renderWarning("本月尚未收集到可展示的兑换码。管理员可在管理页手动刷新或补录。 ");
+          return;
+        }
+
+        const item = data.item;
+        latestCode = item.code;
+        el("code").textContent = item.code;
+        el("period").textContent = item.period;
+        el("status").textContent = item.status === "verified" ? "已确认" : item.status;
+        el("verify").textContent = verificationLabel(item.source_title);
+        el("updated").textContent = item.updated_at;
+        copyButton.disabled = false;
+
+        if (item.source_url) {
+          const link = document.createElement("a");
+          link.href = item.source_url;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.textContent = "查看公开来源";
+          el("source").replaceChildren(link);
+        } else {
+          el("source").textContent = "管理员手动确认";
+        }
+
+        if (!data.isCurrentMonth) {
+          renderWarning("当前月份尚未找到兑换码，页面显示的是最近一次历史记录。请勿直接视为本月有效。 ");
+        }
+      } catch (error) {
+        el("code").textContent = "加载失败";
+        renderWarning("接口读取失败，请稍后重试。 ");
+      }
+    }
+
+    copyButton.addEventListener("click", async () => {
+      if (!latestCode) return;
+      await navigator.clipboard.writeText(latestCode);
+      copyButton.textContent = "已复制";
+      setTimeout(() => copyButton.textContent = "复制", 1200);
+    });
+
+    load();
+  </script>
+</body>
+</html>
