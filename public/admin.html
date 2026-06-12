@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>兑换码管理</title>
+  <style>
+    :root { font-family: Inter, "Microsoft YaHei", sans-serif; color: #172033; background: #f3f7fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; }
+    main { width: min(980px, 100%); margin: 0 auto; }
+    h1 { margin-bottom: 8px; }
+    h2 { margin-top: 0; font-size: 19px; }
+    .sub { color: #66768c; line-height: 1.7; }
+    .card { background: #fff; border: 1px solid #e4ebf2; border-radius: 18px; padding: 20px; margin-top: 16px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    label { display: block; margin-top: 12px; color: #55657b; font-size: 14px; }
+    input { width: 100%; margin-top: 7px; border: 1px solid #dbe4ee; border-radius: 10px; padding: 12px; font-size: 14px; }
+    button, a.button { display: inline-block; border: 0; border-radius: 10px; background: #172033; color: white; padding: 11px 15px; cursor: pointer; text-decoration: none; margin-top: 14px; margin-right: 8px; }
+    button.secondary { background: #edf3f9; color: #263349; }
+    button.small { padding: 7px 10px; margin-top: 0; font-size: 12px; }
+    pre { padding: 14px; border-radius: 12px; background: #f6f8fb; overflow: auto; min-height: 90px; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 6px; border-bottom: 1px solid #edf1f5; text-align: left; vertical-align: top; }
+    th { color: #55657b; font-weight: 600; }
+    td a { color: #315c98; }
+    .status { display: inline-block; border-radius: 999px; padding: 3px 8px; background: #eef4fb; color: #315c98; font-size: 12px; }
+    .muted { color: #7b899c; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>兑换码管理</h1>
+    <p class="sub">管理员令牌仅保存在当前浏览器。自动刷新会依次检查官方频道、官方群入口、LINUX DO 月度讨论帖和第三方备用页面。自动识别失败时，可以指定 LINUX DO 帖子或手动录入。</p>
+
+    <section class="card">
+      <label>管理员令牌<input id="token" type="password" placeholder="ADMIN_TOKEN" /></label>
+      <button id="saveToken">保存令牌</button>
+      <a class="button" href="/">返回首页</a>
+      <button id="reloadAll" class="secondary">刷新后台数据</button>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2>强制刷新</h2>
+        <p class="sub">留空时自动检查全部启用来源。填写后，LINUX DO 来源会直接抓取指定公开帖子；其他启用来源仍会正常检查。</p>
+        <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/2289939" /></label>
+        <button id="refresh">立即刷新全部来源</button>
+      </section>
+
+      <section class="card">
+        <h2>手动补录</h2>
+        <label>月份（可留空，默认当月）<input id="period" placeholder="2026-06" /></label>
+        <label>兑换码<input id="code" placeholder="火焰鸟" /></label>
+        <label>公开来源地址（可选）<input id="sourceUrl" placeholder="https://linux.do/t/topic/2289939" /></label>
+        <button id="manual">写入并确认</button>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>执行结果</h2>
+      <pre id="output">尚未执行</pre>
+    </section>
+
+    <section class="card">
+      <h2>数据源</h2>
+      <p class="sub">官方群入口只检查是否可以访问，不会抓取群聊内容。第三方页面仅作辅助线索，单独出现的结果不会自动发布。</p>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>来源</th><th>类型</th><th>状态</th><th>最近检查</th><th>最近结果</th><th>操作</th></tr></thead>
+          <tbody id="sourceBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>本月候选</h2>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>兑换码</th><th>来源</th><th>可信度</th><th>证据数量</th><th>更新时间</th><th>证据摘要</th></tr></thead>
+          <tbody id="candidateBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>最近日志</h2>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>时间</th><th>月份</th><th>类型</th><th>结果</th><th>说明</th></tr></thead>
+          <tbody id="logBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    el("token").value = localStorage.getItem("adminToken") || "";
+
+    function headers() {
+      return {
+        "Authorization": `Bearer ${el("token").value.trim()}`,
+        "Content-Type": "application/json"
+      };
+    }
+
+    function output(value) {
+      el("output").textContent = JSON.stringify(value, null, 2);
+    }
+
+    async function read(path) {
+      const response = await fetch(path, { headers: headers() });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
+      return data;
+    }
+
+    async function post(path, body) {
+      const response = await fetch(path, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      const data = await response.json();
+      output(data);
+      if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
+      return data;
+    }
+
+    function td(value) {
+      const cell = document.createElement("td");
+      cell.textContent = value ?? "";
+      return cell;
+    }
+
+    function sourceLink(url, label) {
+      const cell = document.createElement("td");
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = label;
+      cell.appendChild(link);
+      return cell;
+    }
+
+    async function loadSources() {
+      const data = await read("/api/admin/sources");
+      el("sourceBody").replaceChildren(...(data.items || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(sourceLink(item.url, item.name));
+        row.appendChild(td(item.source_type));
+        row.appendChild(td(item.enabled ? "已启用" : "已停用"));
+        row.appendChild(td(item.last_checked_at || "--"));
+        row.appendChild(td(item.last_message || "尚未检查"));
+        const action = document.createElement("td");
+        const button = document.createElement("button");
+        button.className = "small secondary";
+        button.textContent = item.enabled ? "停用" : "启用";
+        button.addEventListener("click", async () => {
+          await post("/api/admin/sources/toggle", { sourceKey: item.source_key, enabled: !item.enabled });
+          await loadSources();
+        });
+        action.appendChild(button);
+        row.appendChild(action);
+        return row;
+      }));
+    }
+
+    async function loadCandidates() {
+      const data = await read("/api/admin/candidates");
+      el("candidateBody").replaceChildren(...(data.items || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(td(item.code));
+        row.appendChild(sourceLink(item.source_url, item.source_name));
+        row.appendChild(td(`${Math.round(Number(item.confidence) * 100)}%`));
+        row.appendChild(td(item.evidence_count));
+        row.appendChild(td(item.updated_at));
+        row.appendChild(td(item.evidence || "--"));
+        return row;
+      }));
+    }
+
+    async function loadLogs() {
+      const data = await read("/api/admin/logs");
+      el("logBody").replaceChildren(...(data.items || []).map((item) => {
+        const row = document.createElement("tr");
+        for (const value of [item.created_at, item.period, item.trigger_type, item.result, item.message]) {
+          row.appendChild(td(value));
+        }
+        return row;
+      }));
+    }
+
+    async function reloadAll() {
+      try {
+        await Promise.all([loadSources(), loadCandidates(), loadLogs()]);
+      } catch (error) {
+        output({ ok: false, message: error.message });
+      }
+    }
+
+    el("saveToken").addEventListener("click", async () => {
+      localStorage.setItem("adminToken", el("token").value.trim());
+      output({ ok: true, message: "令牌已保存到当前浏览器" });
+      await reloadAll();
+    });
+
+    el("reloadAll").addEventListener("click", reloadAll);
+
+    el("refresh").addEventListener("click", async () => {
+      try {
+        await post("/api/admin/refresh", { topicUrl: el("topicUrl").value.trim() || null });
+      } finally {
+        await reloadAll();
+      }
+    });
+
+    el("manual").addEventListener("click", async () => {
+      try {
+        await post("/api/admin/manual", {
+          period: el("period").value.trim() || null,
+          code: el("code").value.trim(),
+          sourceUrl: el("sourceUrl").value.trim() || null
+        });
+      } finally {
+        await reloadAll();
+      }
+    });
+
+    if (el("token").value) reloadAll();
+  </script>
+</body>
+</html>
