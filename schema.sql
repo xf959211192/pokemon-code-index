@@ -129,6 +129,23 @@ CREATE TABLE IF NOT EXISTS offer_evidence (
 CREATE INDEX IF NOT EXISTS idx_offer_evidence_period
 ON offer_evidence(period, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS source_discoveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_key TEXT NOT NULL,
+  period TEXT NOT NULL,
+  discovery_kind TEXT NOT NULL,
+  query TEXT NOT NULL,
+  title TEXT,
+  source_url TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(provider_key, period, discovery_kind, source_url, query)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_discoveries_period
+ON source_discoveries(period, score DESC, updated_at DESC);
+
 INSERT OR IGNORE INTO sources (
   source_key, name, url, source_type, priority, enabled, description
 ) VALUES

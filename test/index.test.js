@@ -9,6 +9,7 @@ import worker, {
   extractTelegramPuzzleImage,
   fetchTopic,
   periodOf,
+  providerSearchQueries,
   trustLabelForStatus,
   verifiedFrom
 } from "../src/index.js";
@@ -145,6 +146,21 @@ test("可信度标签面向普通用户表达验证阶段", () => {
   assert.equal(trustLabelForStatus("candidate"), "候选线索，等待复核");
 });
 
+test("搜索流程会基于商家别名、套餐和月份生成发现入口", () => {
+  const queries = providerSearchQueries({
+    aliases: ["宝可梦星云", "pokemon521"],
+    planKeywords: ["入门精灵球"],
+    publicChannels: ["pokemon521"]
+  }, 2026, 6);
+  const text = queries.map((item) => item.query).join("\n");
+
+  assert.ok(text.includes('"宝可梦星云" "优惠码"'));
+  assert.ok(text.includes('"pokemon521" "入门精灵球"'));
+  assert.ok(text.includes('site:t.me/s/pokemon521 "六月"'));
+  assert.ok(text.includes('site:github.com "宝可梦星云" 优惠码'));
+  assert.ok(queries.some((item) => item.kind === "linuxdo_topic"));
+});
+
 test("fetchTopic 会按 post_stream.stream 加载后续评论", async () => {
   const originalFetch = globalThis.fetch;
   const requested = [];
@@ -193,6 +209,30 @@ test("discoverTopic 兼容中文月份标题", async () => {
       url: "https://linux.do/t/topic/11",
       title: "宝可梦机场六月免费兑换码，猜猜我是谁"
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("discoverTopic 会记录每次站内搜索发现的候选帖子", async () => {
+  const originalFetch = globalThis.fetch;
+  const discoveries = [];
+  globalThis.fetch = async () => Response.json({
+    topics: [
+      { id: 11, title: "宝可梦机场六月免费兑换码，猜猜我是谁" }
+    ]
+  });
+
+  try {
+    const topic = await discoverTopic(new Date("2026-06-02T01:00:00.000Z"), {
+      onDiscovery(item) {
+        discoveries.push(item);
+      }
+    });
+    assert.equal(topic.url, "https://linux.do/t/topic/11");
+    assert.ok(discoveries.length > 0);
+    assert.equal(discoveries[0].kind, "linuxdo_topic");
+    assert.equal(discoveries[0].sourceUrl, "https://linux.do/t/topic/11");
   } finally {
     globalThis.fetch = originalFetch;
   }

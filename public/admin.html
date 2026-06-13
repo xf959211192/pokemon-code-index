@@ -38,6 +38,7 @@
       <button id="saveToken">保存令牌</button>
       <a class="button" href="/">返回首页</a>
       <button id="checkHealth" class="secondary">检查服务状态</button>
+      <button id="runDiscovery" class="secondary">搜索发现入口</button>
       <button id="reloadAll" class="secondary">刷新后台数据</button>
     </section>
 
@@ -81,6 +82,23 @@
         <table>
           <thead><tr><th>兑换码</th><th>来源</th><th>可信度</th><th>证据数量</th><th>更新时间</th><th>证据摘要</th></tr></thead>
           <tbody id="candidateBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>搜索发现</h2>
+      <p class="sub">按商家别名、套餐关键词、公开频道和月份生成查询。当前 Worker 自动执行 LINUX DO 公开站内搜索，其他查询用于人工交叉验证或后续接入搜索 API。</p>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>类型</th><th>查询</th><th>用途</th></tr></thead>
+          <tbody id="plannedDiscoveryBody"></tbody>
+        </table>
+      </div>
+      <div style="overflow:auto; margin-top: 14px;">
+        <table>
+          <thead><tr><th>时间</th><th>类型</th><th>标题</th><th>得分</th><th>查询</th></tr></thead>
+          <tbody id="discoveredBody"></tbody>
         </table>
       </div>
     </section>
@@ -216,6 +234,26 @@
       }));
     }
 
+    async function loadDiscovery() {
+      const data = await read("/api/admin/discovery");
+      el("plannedDiscoveryBody").replaceChildren(...(data.planned || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(td(item.kind));
+        row.appendChild(td(item.query));
+        row.appendChild(td(item.purpose));
+        return row;
+      }));
+      el("discoveredBody").replaceChildren(...(data.discovered || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(td(item.updated_at));
+        row.appendChild(td(item.discovery_kind));
+        row.appendChild(sourceLink(item.source_url, item.title || item.source_url));
+        row.appendChild(td(item.score));
+        row.appendChild(td(item.query));
+        return row;
+      }));
+    }
+
     async function loadOffers() {
       const data = await read("/api/admin/offers");
       el("offerBody").replaceChildren(...(data.items || []).map((item) => {
@@ -258,7 +296,7 @@
 
     async function reloadAll() {
       try {
-        await Promise.all([loadSources(), loadCandidates(), loadOffers(), loadEvidence(), loadLogs()]);
+        await Promise.all([loadSources(), loadCandidates(), loadDiscovery(), loadOffers(), loadEvidence(), loadLogs()]);
       } catch (error) {
         output({ ok: false, message: error.message });
       }
@@ -277,6 +315,14 @@
         output(await read("/api/health"));
       } catch (error) {
         output({ ok: false, message: error.message });
+      }
+    });
+
+    el("runDiscovery").addEventListener("click", async () => {
+      try {
+        await post("/api/admin/discover", {});
+      } finally {
+        await reloadAll();
       }
     });
 

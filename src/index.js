@@ -4,6 +4,7 @@ const OFFICIAL_GROUP_URL = "https://t.me/pokemon_love";
 const POKEMON_PROVIDER_KEY = "pokemon_nebula";
 const MAX_TOPIC_POSTS = 240;
 const TOPIC_POST_BATCH_SIZE = 40;
+const MAX_DISCOVERY_QUERIES = 28;
 const CN_MONTHS = [
   "",
   "一",
@@ -24,6 +25,17 @@ const STOP_WORDS = new Set([
   "感谢", "谢谢", "支持", "兑换", "成功", "宝可梦", "火烈鸟", "兑换码", "优惠码",
   "白嫖码", "礼品卡", "猜猜我是谁", "管理员手动确认", "来了", "大佬", "本月"
 ]);
+
+const DEFAULT_PROVIDER = {
+  providerKey: POKEMON_PROVIDER_KEY,
+  canonicalName: "宝可梦星云",
+  aliases: ["宝可梦VPN", "宝可梦加速器", "宝可梦机场", "宝可梦云", "宝可梦星云", "52pokemon", "pokemon521"],
+  officialDomains: [],
+  publicChannels: ["pokemon521"],
+  planKeywords: ["入门精灵球", "高级精灵球", "免费套餐", "白嫖码"]
+};
+
+const OFFER_KEYWORDS = ["优惠码", "兑换码", "折扣码", "邀请码", "口令", "白嫖码", "礼品卡", "免费套餐", "新用户", "首单", "活动"];
 
 function json(data, status = 200, headers = {}) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store", ...headers } });
@@ -92,6 +104,32 @@ function stripHtml(text = "") {
 function snippet(text = "", limit = 220) {
   const value = stripHtml(text);
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+function uniq(values) {
+  return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
+}
+
+function parseJsonList(value, fallback = []) {
+  if (Array.isArray(value)) return uniq(value);
+  try {
+    const parsed = JSON.parse(value ?? "[]");
+    return Array.isArray(parsed) ? uniq(parsed) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeProvider(row = null) {
+  if (!row) return DEFAULT_PROVIDER;
+  return {
+    providerKey: row.provider_key ?? DEFAULT_PROVIDER.providerKey,
+    canonicalName: row.canonical_name ?? DEFAULT_PROVIDER.canonicalName,
+    aliases: parseJsonList(row.aliases, DEFAULT_PROVIDER.aliases),
+    officialDomains: parseJsonList(row.official_domains, DEFAULT_PROVIDER.officialDomains),
+    publicChannels: parseJsonList(row.public_channels, DEFAULT_PROVIDER.publicChannels),
+    planKeywords: parseJsonList(row.plan_keywords, DEFAULT_PROVIDER.planKeywords)
+  };
 }
 
 function plausibleCode(value) {
@@ -195,15 +233,41 @@ function monthSearchTerms(month) {
   ];
 }
 
-function topicSearchQueries(year, month) {
+function providerSearchQueries(provider = DEFAULT_PROVIDER, year, month) {
   const terms = monthSearchTerms(month);
-  return [
-    `宝可梦机场 ${year}年 ${terms[0]} 免费兑换码 猜猜我是谁`,
-    `宝可梦机场 ${year}年 ${terms[3]} 免费兑换码`,
-    `宝可梦星云 ${year}年 ${terms[0]} 免费兑换码`,
-    `宝可梦 ${year} ${terms[1]} 兑换码`,
-    `pokemon 宝可梦 ${year} ${terms[0]} 兑换码`
-  ];
+  const aliases = uniq([provider.canonicalName, ...(provider.aliases ?? [])]);
+  const planKeywords = uniq(provider.planKeywords ?? []);
+  const publicChannels = uniq(provider.publicChannels ?? []);
+  const queries = [];
+  const push = (kind, query, purpose) => {
+    const value = String(query ?? "").replace(/\s+/g, " ").trim();
+    if (!value) return;
+    const key = `${kind}|${value}`;
+    if (!queries.some((item) => `${item.kind}|${item.query}` === key)) queries.push({ kind, query: value, purpose });
+  };
+
+  for (const alias of aliases.slice(0, 8)) {
+    for (const keyword of OFFER_KEYWORDS.slice(0, 6)) push("web_discovery", `"${alias}" "${keyword}"`, "全网发现候选来源");
+    for (const plan of planKeywords.slice(0, 3)) push("web_discovery", `"${alias}" "${plan}"`, "套餐上下文发现");
+    push("web_discovery", `"${alias}" "${terms[0]}" 优惠码`, "当月优惠码发现");
+    push("linuxdo_topic", `${alias} ${year}年 ${terms[0]} 免费兑换码 猜猜我是谁`, "LINUX DO 月度帖发现");
+    push("linuxdo_topic", `${alias} ${year}年 ${terms[3]} 免费兑换码`, "LINUX DO 中文月份发现");
+    push("github_discovery", `site:github.com "${alias}" 优惠码`, "GitHub 公开汇总交叉验证入口");
+  }
+
+  for (const channel of publicChannels) {
+    push("telegram_channel", `site:t.me/s/${channel} "${terms[3]}"`, "公开 Telegram 频道当月活动核对");
+    push("telegram_channel", `site:t.me/s/${channel} "免费优惠码"`, "公开 Telegram 频道优惠码核对");
+  }
+
+  return queries;
+}
+
+function topicSearchQueries(year, month, provider = DEFAULT_PROVIDER) {
+  return providerSearchQueries(provider, year, month)
+    .filter((item) => item.kind === "linuxdo_topic")
+    .slice(0, MAX_DISCOVERY_QUERIES)
+    .map((item) => item.query);
 }
 
 function scoreTopicTitle(title, monthTerms) {
@@ -215,17 +279,30 @@ function scoreTopicTitle(title, monthTerms) {
   return score;
 }
 
-async function discoverTopic(now = new Date()) {
+async function discoverTopic(now = new Date(), options = {}) {
   const { year, month } = chinaParts(now);
   const monthTerms = monthSearchTerms(month);
+  const provider = options.provider ?? DEFAULT_PROVIDER;
   const seen = new Map();
-  for (const query of topicSearchQueries(year, month)) {
+  for (const query of topicSearchQueries(year, month, provider)) {
     const q = encodeURIComponent(query);
     const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
     for (const item of body.topics ?? []) {
       const title = String(item.title ?? "");
       if (!title.includes("宝可梦")) continue;
       const score = scoreTopicTitle(title, monthTerms);
+      const sourceUrl = `${LINUXDO_BASE}/t/topic/${item.id}`;
+      if (options.onDiscovery) {
+        await options.onDiscovery({
+          providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
+          period: periodOf(now),
+          kind: "linuxdo_topic",
+          query,
+          title,
+          sourceUrl,
+          score
+        });
+      }
       const current = seen.get(item.id);
       if (!current || score > current.score) seen.set(item.id, { id: item.id, title, score });
     }
@@ -327,9 +404,59 @@ async function enabledSources(env) {
   return results;
 }
 
+async function getProvider(env) {
+  try {
+    const row = await env.DB.prepare(`
+      SELECT provider_key, canonical_name, aliases, official_domains, public_channels, plan_keywords
+      FROM providers
+      WHERE provider_key = ?
+      LIMIT 1
+    `).bind(POKEMON_PROVIDER_KEY).first();
+    return normalizeProvider(row);
+  } catch {
+    return DEFAULT_PROVIDER;
+  }
+}
+
+async function recordDiscovery(env, item) {
+  try {
+    await env.DB.prepare(`
+      INSERT INTO source_discoveries(provider_key, period, discovery_kind, query, title, source_url, score, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(provider_key, period, discovery_kind, source_url, query) DO UPDATE SET
+        title = excluded.title,
+        score = MAX(source_discoveries.score, excluded.score),
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(
+      item.providerKey,
+      item.period,
+      item.kind,
+      item.query,
+      item.title,
+      item.sourceUrl,
+      item.score
+    ).run();
+  } catch (error) {
+    console.warn("record_discovery_failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function listCandidates(env, period) {
   const { results } = await env.DB.prepare(`SELECT period, code, source_key, source_name, source_type, source_url, confidence, evidence_count, evidence, updated_at FROM code_candidates WHERE period = ? ORDER BY confidence DESC, evidence_count DESC, updated_at DESC`).bind(period).all();
   return results;
+}
+
+async function listDiscovery(env, period) {
+  const provider = await getProvider(env);
+  const planned = providerSearchQueries(provider, ...period.split("-").map(Number)).slice(0, 80);
+  const { results } = await env.DB.prepare(`
+    SELECT period, discovery_kind, query, title, source_url, score, updated_at
+    FROM source_discoveries
+    WHERE period = ?
+    ORDER BY score DESC, updated_at DESC
+    LIMIT 80
+  `).bind(period).all();
+  return { planned, discovered: results };
 }
 
 async function listOffers(env, period) {
@@ -384,7 +511,11 @@ async function upsertCode(env, period, item) {
 async function collectSource(env, source, period, now, topicUrl = null) {
   try {
     if (source.source_type === "linuxdo_search") {
-      const found = topicUrl ? { url: normalizeTopic(topicUrl) } : await discoverTopic(now);
+      const provider = await getProvider(env);
+      const found = topicUrl ? { url: normalizeTopic(topicUrl) } : await discoverTopic(now, {
+        provider,
+        onDiscovery: (item) => recordDiscovery(env, item)
+      });
       const topic = await fetchTopic(found.url);
       const item = communityCandidate(topic);
       if (item) await saveCandidate(env, period, item);
@@ -547,6 +678,39 @@ async function testTopic(data) {
       ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}`
       : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
   };
+}
+
+async function runDiscovery(env, now = new Date()) {
+  const provider = await getProvider(env);
+  const period = periodOf(now);
+  const discoveries = [];
+  try {
+    const topic = await discoverTopic(now, {
+      provider,
+      onDiscovery(item) {
+        discoveries.push(item);
+        return recordDiscovery(env, item);
+      }
+    });
+    await log(env, period, "manual_discovery", "discovered", `搜索发现 ${discoveries.length} 个 LINUX DO 候选入口，最佳帖子：${topic.title}`, topic.url);
+    return {
+      ok: true,
+      period,
+      bestTopic: topic,
+      plannedQueries: providerSearchQueries(provider, chinaParts(now).year, chinaParts(now).month).slice(0, 80),
+      discoveries
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await log(env, period, "manual_discovery", "error", message);
+    return {
+      ok: false,
+      period,
+      message,
+      plannedQueries: providerSearchQueries(provider, chinaParts(now).year, chinaParts(now).month).slice(0, 80),
+      discoveries
+    };
+  }
 }
 
 function hashText(value = "") {
@@ -757,6 +921,8 @@ export default {
       if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: periodOf(), items: await listCandidates(env, periodOf()) });
       if (url.pathname === "/api/admin/offers" && request.method === "GET") return json({ period: periodOf(), items: await listOffers(env, periodOf()) });
       if (url.pathname === "/api/admin/evidence" && request.method === "GET") return json({ period: periodOf(), items: await listEvidence(env, periodOf()) });
+      if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: periodOf(), ...(await listDiscovery(env, periodOf())) });
+      if (url.pathname === "/api/admin/discover" && request.method === "POST") return json(await runDiscovery(env));
       if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.source_url AS last_source_url, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
       if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
         const data = await body(request);
@@ -784,6 +950,8 @@ export {
   fetchTopicPosts,
   inAutoWindow,
   periodOf,
+  providerSearchQueries,
+  runDiscovery,
   testTopic,
   topicSearchQueries,
   trustLabelForStatus,
