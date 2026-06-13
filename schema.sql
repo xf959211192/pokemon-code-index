@@ -98,22 +98,4 @@ INSERT OR IGNORE INTO sources (
   30,
   1,
   '自动搜索当月公开帖子，并根据评论区重复答案提取社区共识。'
-),
-(
-  'go4sharing_article',
-  '趣分享备用介绍页',
-  'https://go4sharing.github.io/2025/06/01/%E5%85%AC%E7%9B%8A%E6%9C%BA%E5%9C%BA-%E5%AE%9D%E5%8F%AF%E6%A2%A6%E6%98%9F%E4%BA%91-60G-%E6%9C%88-50%E4%B8%AA%E8%8A%82%E7%82%B9/',
-  'third_party_html',
-  80,
-  1,
-  '第三方备用信息页。只作为辅助线索，单独命中不会自动发布。'
-),
-(
-  'go4sharing_telegram',
-  '趣分享 Telegram 频道',
-  'https://t.me/s/go4sharing',
-  'third_party_telegram',
-  90,
-  1,
-  '第三方公开频道。只提取宝可梦相关上下文，单独命中不会自动发布。'
 );

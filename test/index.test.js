@@ -127,6 +127,29 @@ test("discoverTopic 兼容中文月份标题", async () => {
   }
 });
 
+test("discoverTopic 会使用多组公开搜索词扩大命中范围", async () => {
+  const originalFetch = globalThis.fetch;
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    if (requested.length === 1) return Response.json({ topics: [] });
+    return Response.json({
+      topics: [
+        { id: 99, title: "宝可梦星云 2026 年 6 月免费兑换码，猜猜我是谁" }
+      ]
+    });
+  };
+
+  try {
+    const topic = await discoverTopic(new Date("2026-06-02T01:00:00.000Z"));
+    assert.equal(topic.url, "https://linux.do/t/topic/99");
+    assert.ok(requested.length >= 2);
+    assert.ok(requested.some((url) => decodeURIComponent(url).includes("宝可梦星云")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("管理员测试帖子接口只分析不写数据库", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {

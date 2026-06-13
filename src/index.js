@@ -156,22 +156,55 @@ function explicitCandidates(text, source, confidence) {
   return [...map.values()];
 }
 
+function monthSearchTerms(month) {
+  const padded = String(month).padStart(2, "0");
+  const cn = CN_MONTHS[month];
+  return [
+    `${month}月`,
+    `${month}月份`,
+    `${padded}月`,
+    `${cn}月`,
+    `${cn}月份`,
+    `${month} 月`
+  ];
+}
+
+function topicSearchQueries(year, month) {
+  const terms = monthSearchTerms(month);
+  return [
+    `宝可梦机场 ${year}年 ${terms[0]} 免费兑换码 猜猜我是谁`,
+    `宝可梦机场 ${year}年 ${terms[3]} 免费兑换码`,
+    `宝可梦星云 ${year}年 ${terms[0]} 免费兑换码`,
+    `宝可梦 ${year} ${terms[1]} 兑换码`,
+    `pokemon 宝可梦 ${year} ${terms[0]} 兑换码`
+  ];
+}
+
+function scoreTopicTitle(title, monthTerms) {
+  let score = 0;
+  if (monthTerms.some((term) => title.includes(term))) score += 6;
+  if (/兑换码|优惠码|白嫖码|免费码/.test(title)) score += 4;
+  if (/猜猜我是谁|答案|谜题/.test(title)) score += 3;
+  if (/宝可梦机场|宝可梦星云/.test(title)) score += 2;
+  return score;
+}
+
 async function discoverTopic(now = new Date()) {
   const { year, month } = chinaParts(now);
-  const monthTerms = [`${month}月`, `${CN_MONTHS[month]}月`, `${CN_MONTHS[month]}月份`];
-  const q = encodeURIComponent(`宝可梦机场 ${year}年 ${monthTerms.join(" ")} 免费兑换码 猜猜我是谁`);
-  const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
-  const ranked = (body.topics ?? [])
-    .filter((item) => String(item.title ?? "").includes("宝可梦"))
-    .map((item) => {
+  const monthTerms = monthSearchTerms(month);
+  const seen = new Map();
+  for (const query of topicSearchQueries(year, month)) {
+    const q = encodeURIComponent(query);
+    const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
+    for (const item of body.topics ?? []) {
       const title = String(item.title ?? "");
-      let score = 0;
-      if (monthTerms.some((term) => title.includes(term))) score += 6;
-      if (/兑换码|优惠码|白嫖码/.test(title)) score += 4;
-      if (title.includes("猜猜我是谁")) score += 3;
-      return { id: item.id, title, score };
-    })
-    .sort((a, b) => b.score - a.score);
+      if (!title.includes("宝可梦")) continue;
+      const score = scoreTopicTitle(title, monthTerms);
+      const current = seen.get(item.id);
+      if (!current || score > current.score) seen.set(item.id, { id: item.id, title, score });
+    }
+  }
+  const ranked = [...seen.values()].sort((a, b) => b.score - a.score);
   if (!ranked[0] || ranked[0].score < 6) throw new Error("没有发现本月公开帖子");
   return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
 }
@@ -460,4 +493,4 @@ export default {
   }
 };
 
-export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, verifiedFrom };
+export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, topicSearchQueries, verifiedFrom };
