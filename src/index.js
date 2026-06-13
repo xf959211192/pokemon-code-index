@@ -2,9 +2,11 @@ const LINUXDO_BASE = "https://linux.do";
 const OFFICIAL_CHANNEL_URL = "https://t.me/s/pokemon521";
 const OFFICIAL_GROUP_URL = "https://t.me/pokemon_love";
 const POKEMON_PROVIDER_KEY = "pokemon_nebula";
+const JINA_READER_BASE = "https://r.jina.ai/http://";
 const MAX_TOPIC_POSTS = 240;
 const TOPIC_POST_BATCH_SIZE = 40;
 const MAX_DISCOVERY_QUERIES = 28;
+const MAX_READER_TOPIC_PAGES = 3;
 const CN_MONTHS = [
   "",
   "一",
@@ -336,9 +338,71 @@ async function fetchTopicPosts(normalized, initialBody) {
 
 async function fetchTopic(url) {
   const normalized = normalizeTopic(url);
-  const body = JSON.parse(await fetchText(`${normalized}.json`, "application/json"));
-  const posts = await fetchTopicPosts(normalized, body);
-  return { url: normalized, title: String(body.title ?? ""), posts };
+  try {
+    const body = JSON.parse(await fetchText(`${normalized}.json`, "application/json"));
+    const posts = await fetchTopicPosts(normalized, body);
+    return { url: normalized, title: String(body.title ?? ""), posts };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/^HTTP (403|429)$/.test(message)) throw error;
+    return await fetchTopicViaReader(normalized);
+  }
+}
+
+function readerUrlForLinuxDo(value) {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("Reader 回退仅允许读取 linux.do 公开帖子");
+  return `${JINA_READER_BASE}${url.hostname}${url.pathname}${url.search}`;
+}
+
+function parseReaderTopic(markdown, normalized, fallbackTitle = "") {
+  const text = String(markdown ?? "");
+  const title = text.match(/^Title:\s*(.+)$/m)?.[1]?.trim()
+    || text.match(/^#\s+(.+)$/m)?.[1]?.trim()
+    || fallbackTitle;
+  const content = text.includes("Markdown Content:")
+    ? text.slice(text.indexOf("Markdown Content:") + "Markdown Content:".length)
+    : text;
+  const chunks = content.split(/\n## post by [^\n]+\n/);
+  const posts = chunks
+    .map((chunk, index) => ({
+      id: index + 1,
+      cooked: chunk.trim()
+    }))
+    .filter((post) => post.cooked);
+  return { url: normalized, title, posts };
+}
+
+function mergeTopicPosts(topics, normalized) {
+  const title = topics.find((topic) => topic.title)?.title ?? "";
+  const seen = new Set();
+  const posts = [];
+  for (const topic of topics) {
+    for (const post of topic.posts) {
+      const key = snippet(post.cooked, 160);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      posts.push({ id: posts.length + 1, cooked: post.cooked });
+      if (posts.length >= MAX_TOPIC_POSTS) return { url: normalized, title, posts };
+    }
+  }
+  return { url: normalized, title, posts };
+}
+
+async function fetchTopicViaReader(normalized) {
+  const requests = [];
+  for (let page = 1; page <= MAX_READER_TOPIC_PAGES; page += 1) {
+    const pageUrl = page === 1 ? normalized : `${normalized}?page=${page}`;
+    requests.push(fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*"));
+  }
+  const settled = await Promise.allSettled(requests);
+  const topics = settled
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => parseReaderTopic(result.value, normalized))
+    .filter((topic) => topic.posts.length);
+  const merged = mergeTopicPosts(topics, normalized);
+  if (!merged.posts.length) throw new Error("Reader 回退未读取到公开帖子内容");
+  return merged;
 }
 
 function communityCandidate(topic) {
@@ -357,6 +421,12 @@ function communityCandidate(topic) {
     if (!text) continue;
     for (const match of text.matchAll(/(?:兑换码|优惠码|答案|应该是|我猜|就是)\s*[：:\-=]?\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})/gi)) add(match[1], 3, text);
     for (const match of text.matchAll(/([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})\s*(?:已)?(?:兑换|续费)成功/gi)) add(match[1], 3, text);
+    for (const line of String(post.cooked ?? post.raw ?? "").split(/\n+/)) {
+      const plainLine = stripHtml(line);
+      if (!plainLine || /!\[|]\(|https?:\/\//.test(line)) continue;
+      const standalone = plainLine.match(/^#*\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})(?:[，,。！!；;：:\s].*)?$/);
+      if (standalone) add(standalone[1], 1, plainLine);
+    }
     const first = text.match(/^#*\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})(?=[，,。！!；;：:\s]|$)/);
     if (first) add(first[1], 1, text);
   }

@@ -194,6 +194,47 @@ test("fetchTopic 会按 post_stream.stream 加载后续评论", async () => {
   }
 });
 
+test("fetchTopic 在 LINUX DO JSON 被拒绝时会使用公开 Reader 回退", async () => {
+  const originalFetch = globalThis.fetch;
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    if (String(url).endsWith("/t/topic/2289939.json")) return new Response("Forbidden", { status: 403 });
+    return new Response(`
+Title: 宝可梦机场之六月免费兑换码猜猜我是谁 - 福利羊毛 - LINUX DO
+
+Markdown Content:
+# 宝可梦机场之六月免费兑换码猜猜我是谁
+
+使用教程：猜出来名字，购买入门精灵球优惠码那里输入。
+
+## post by qppq54 on Jun 2
+
+火焰鸟
+
+## post by KonBAI on Jun 2
+
+火焰鸟,一直在用，感谢佬提供的机场服务！
+
+## post by MFC on Jun 2
+
+火焰鸟 感谢各位宝可梦大佬给出正确答案
+`, {
+      status: 200,
+      headers: { "Content-Type": "text/plain" }
+    });
+  };
+
+  try {
+    const topic = await fetchTopic("https://linux.do/t/topic/2289939");
+    assert.equal(topic.title, "宝可梦机场之六月免费兑换码猜猜我是谁 - 福利羊毛 - LINUX DO");
+    assert.equal(topic.posts.length, 4);
+    assert.ok(requested.some((url) => url.startsWith("https://r.jina.ai/http://linux.do/t/topic/2289939")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("discoverTopic 兼容中文月份标题", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({
