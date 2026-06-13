@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildHealth, periodOf, verifiedFrom } from "../src/index.js";
+import { buildHealth, discoverTopic, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
 
 function createDb({ hasVerified = false, fail = false } = {}) {
   return {
@@ -72,4 +72,57 @@ test("第三方来源单独候选不会触发自动确认", () => {
   ]);
 
   assert.equal(result, null);
+});
+
+test("fetchTopic 会按 post_stream.stream 加载后续评论", async () => {
+  const originalFetch = globalThis.fetch;
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    if (String(url).endsWith("/t/topic/2289939.json")) {
+      return Response.json({
+        title: "六月兑换码",
+        post_stream: {
+          stream: [1, 2, 3],
+          posts: [{ id: 1, cooked: "主帖" }]
+        }
+      });
+    }
+    return Response.json({
+      post_stream: {
+        posts: [
+          { id: 2, cooked: "兑换码：火焰鸟" },
+          { id: 3, cooked: "火焰鸟兑换成功" }
+        ]
+      }
+    });
+  };
+
+  try {
+    const topic = await fetchTopic("https://linux.do/t/topic/2289939");
+    assert.deepEqual(topic.posts.map((post) => post.id), [1, 2, 3]);
+    assert.equal(requested[1], "https://linux.do/t/topic/2289939.json?post_ids[]=2&post_ids[]=3");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("discoverTopic 兼容中文月份标题", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    topics: [
+      { id: 11, title: "宝可梦机场六月免费兑换码，猜猜我是谁" },
+      { id: 12, title: "宝可梦机场五月免费兑换码，猜猜我是谁" }
+    ]
+  });
+
+  try {
+    const topic = await discoverTopic(new Date("2026-06-02T01:00:00.000Z"));
+    assert.deepEqual(topic, {
+      url: "https://linux.do/t/topic/11",
+      title: "宝可梦机场六月免费兑换码，猜猜我是谁"
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

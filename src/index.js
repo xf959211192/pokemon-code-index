@@ -1,6 +1,23 @@
 const LINUXDO_BASE = "https://linux.do";
 const OFFICIAL_CHANNEL_URL = "https://t.me/s/pokemon521";
 const OFFICIAL_GROUP_URL = "https://t.me/pokemon_love";
+const MAX_TOPIC_POSTS = 240;
+const TOPIC_POST_BATCH_SIZE = 40;
+const CN_MONTHS = [
+  "",
+  "一",
+  "二",
+  "三",
+  "四",
+  "五",
+  "六",
+  "七",
+  "八",
+  "九",
+  "十",
+  "十一",
+  "十二"
+];
 
 const STOP_WORDS = new Set([
   "感谢", "谢谢", "支持", "兑换", "成功", "宝可梦", "火烈鸟", "兑换码", "优惠码",
@@ -141,15 +158,15 @@ function explicitCandidates(text, source, confidence) {
 
 async function discoverTopic(now = new Date()) {
   const { year, month } = chinaParts(now);
-  const q = encodeURIComponent(`宝可梦机场 ${year}年${month}月 免费兑换码 猜猜我是谁`);
+  const monthTerms = [`${month}月`, `${CN_MONTHS[month]}月`, `${CN_MONTHS[month]}月份`];
+  const q = encodeURIComponent(`宝可梦机场 ${year}年 ${monthTerms.join(" ")} 免费兑换码 猜猜我是谁`);
   const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
-  const monthText = `${month}月`;
   const ranked = (body.topics ?? [])
     .filter((item) => String(item.title ?? "").includes("宝可梦"))
     .map((item) => {
       const title = String(item.title ?? "");
       let score = 0;
-      if (title.includes(monthText)) score += 6;
+      if (monthTerms.some((term) => title.includes(term))) score += 6;
       if (/兑换码|优惠码|白嫖码/.test(title)) score += 4;
       if (title.includes("猜猜我是谁")) score += 3;
       return { id: item.id, title, score };
@@ -159,10 +176,33 @@ async function discoverTopic(now = new Date()) {
   return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
 }
 
+async function fetchTopicPosts(normalized, initialBody) {
+  const initialPosts = initialBody.post_stream?.posts ?? [];
+  const allIds = (initialBody.post_stream?.stream ?? []).slice(0, MAX_TOPIC_POSTS);
+  const posts = [...initialPosts];
+  const loadedIds = new Set(initialPosts.map((post) => post.id));
+  const missingIds = allIds.filter((id) => !loadedIds.has(id));
+
+  for (let index = 0; index < missingIds.length; index += TOPIC_POST_BATCH_SIZE) {
+    const batch = missingIds.slice(index, index + TOPIC_POST_BATCH_SIZE);
+    const query = batch.map((id) => `post_ids[]=${encodeURIComponent(id)}`).join("&");
+    const body = JSON.parse(await fetchText(`${normalized}.json?${query}`, "application/json"));
+    for (const post of body.post_stream?.posts ?? []) {
+      if (!loadedIds.has(post.id)) {
+        posts.push(post);
+        loadedIds.add(post.id);
+      }
+    }
+  }
+
+  return posts.slice(0, MAX_TOPIC_POSTS);
+}
+
 async function fetchTopic(url) {
   const normalized = normalizeTopic(url);
   const body = JSON.parse(await fetchText(`${normalized}.json`, "application/json"));
-  return { url: normalized, title: String(body.title ?? ""), posts: body.post_stream?.posts ?? [] };
+  const posts = await fetchTopicPosts(normalized, body);
+  return { url: normalized, title: String(body.title ?? ""), posts };
 }
 
 function communityCandidate(topic) {
@@ -267,7 +307,17 @@ async function collectSource(env, source, period, now, topicUrl = null) {
       const topic = await fetchTopic(found.url);
       const item = communityCandidate(topic);
       if (item) await saveCandidate(env, period, item);
-      await sourceCheck(env, source, period, item ? "candidate_found" : "no_candidate", item ? `社区候选：${item.code}` : "已找到帖子，但没有提取出高可信社区答案", item ? 1 : 0, topic.url);
+      await sourceCheck(
+        env,
+        source,
+        period,
+        item ? "candidate_found" : "no_candidate",
+        item
+          ? `读取评论 ${topic.posts.length} 条；社区候选：${item.code}；证据分数：${item.evidenceCount}`
+          : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`,
+        item ? 1 : 0,
+        topic.url
+      );
       return;
     }
     const text = await fetchText(source.url);
@@ -388,4 +438,4 @@ export default {
   }
 };
 
-export { buildHealth, inAutoWindow, periodOf, verifiedFrom };
+export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, verifiedFrom };
