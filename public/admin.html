@@ -31,7 +31,7 @@
 <body>
   <main>
     <h1>兑换码管理</h1>
-    <p class="sub">管理员令牌仅保存在当前浏览器。自动刷新会依次检查官方频道、官方群入口、LINUX DO 月度讨论帖和第三方备用页面。自动识别失败时，可以指定 LINUX DO 帖子或手动录入。</p>
+    <p class="sub">管理员令牌仅保存在当前浏览器。自动刷新会依次检查官方频道、官方群入口和 LINUX DO 月度讨论帖。自动识别失败时，可以指定 LINUX DO 帖子或手动录入。</p>
 
     <section class="card">
       <label>管理员令牌<input id="token" type="password" placeholder="ADMIN_TOKEN" /></label>
@@ -81,6 +81,28 @@
         <table>
           <thead><tr><th>兑换码</th><th>来源</th><th>可信度</th><th>证据数量</th><th>更新时间</th><th>证据摘要</th></tr></thead>
           <tbody id="candidateBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>优惠记录</h2>
+      <p class="sub">这里按证据聚合展示优惠码状态。第三方单独报告只进入记录，不会自动发布到首页。</p>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>兑换码</th><th>状态</th><th>可信度</th><th>来源数</th><th>最后发现</th><th>说明</th></tr></thead>
+          <tbody id="offerBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>证据记录</h2>
+      <p class="sub">保留来源地址、提取方式和证据摘要，用于人工复核和后续失效检测。</p>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>时间</th><th>兑换码</th><th>来源</th><th>状态</th><th>分数</th><th>提取方式</th><th>证据摘要</th></tr></thead>
+          <tbody id="evidenceBody"></tbody>
         </table>
       </div>
     </section>
@@ -194,6 +216,35 @@
       }));
     }
 
+    async function loadOffers() {
+      const data = await read("/api/admin/offers");
+      el("offerBody").replaceChildren(...(data.items || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(td(item.code));
+        row.appendChild(td(item.status));
+        row.appendChild(td(`${item.confidence_score} / 100`));
+        row.appendChild(td(item.source_count));
+        row.appendChild(td(item.last_seen_at || item.updated_at));
+        row.appendChild(td(item.trust_label || "--"));
+        return row;
+      }));
+    }
+
+    async function loadEvidence() {
+      const data = await read("/api/admin/evidence");
+      el("evidenceBody").replaceChildren(...(data.items || []).map((item) => {
+        const row = document.createElement("tr");
+        row.appendChild(td(item.created_at));
+        row.appendChild(td(item.code || "--"));
+        row.appendChild(sourceLink(item.source_url, item.source_key || item.source_type));
+        row.appendChild(td(item.status));
+        row.appendChild(td(item.confidence_score));
+        row.appendChild(td(item.extraction_method || "--"));
+        row.appendChild(td(item.evidence_excerpt || "--"));
+        return row;
+      }));
+    }
+
     async function loadLogs() {
       const data = await read("/api/admin/logs");
       el("logBody").replaceChildren(...(data.items || []).map((item) => {
@@ -207,7 +258,7 @@
 
     async function reloadAll() {
       try {
-        await Promise.all([loadSources(), loadCandidates(), loadLogs()]);
+        await Promise.all([loadSources(), loadCandidates(), loadOffers(), loadEvidence(), loadLogs()]);
       } catch (error) {
         output({ ok: false, message: error.message });
       }

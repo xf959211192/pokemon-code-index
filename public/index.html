@@ -32,7 +32,7 @@
     <section class="card">
       <p class="eyebrow">MONTHLY CODE INDEX</p>
       <h1>宝可梦每月兑换码</h1>
-      <p class="desc">每月 1 日至 7 日自动检查官方通知频道、LINUX DO 月度讨论帖和备用公开页面。发现当月兑换码后，本月停止重复抓取。</p>
+      <p class="desc">每月 1 日至 7 日自动检查官方通知频道和 LINUX DO 月度讨论帖。页面以公开证据、社区共识和人工核验为基础展示可信度。</p>
 
       <div class="code-box">
         <span id="code">读取中...</span>
@@ -44,7 +44,8 @@
       <div class="meta">
         <div class="meta-row"><span>对应月份</span><span id="period" class="value">--</span></div>
         <div class="meta-row"><span>状态</span><span id="status" class="value">--</span></div>
-        <div class="meta-row"><span>验证方式</span><span id="verify" class="value">--</span></div>
+        <div class="meta-row"><span>可信度</span><span id="verify" class="value">--</span></div>
+        <div class="meta-row"><span>证据来源数</span><span id="sourceCount" class="value">--</span></div>
         <div class="meta-row"><span>更新时间</span><span id="updated" class="value">--</span></div>
         <div class="meta-row"><span>来源</span><span id="source" class="value">--</span></div>
       </div>
@@ -112,7 +113,8 @@
         el("code").textContent = item.code;
         el("period").textContent = item.period;
         el("status").textContent = item.status === "verified" ? "已确认" : item.status;
-        el("verify").textContent = verificationLabel(item.source_title);
+        el("verify").textContent = item.trust_label || verificationLabel(item.source_title);
+        el("sourceCount").textContent = item.source_count ? `${item.source_count} 个` : "--";
         el("updated").textContent = item.updated_at;
         copyButton.disabled = false;
 

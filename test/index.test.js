@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { buildHealth, discoverTopic, extractTelegramPuzzleImage, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
+import worker, {
+  buildHealth,
+  discoverTopic,
+  evidenceFromCandidate,
+  evidenceFromPuzzle,
+  extractTelegramPuzzleImage,
+  fetchTopic,
+  periodOf,
+  trustLabelForStatus,
+  verifiedFrom
+} from "../src/index.js";
 
 function createDb({ hasVerified = false, fail = false } = {}) {
   return {
@@ -72,6 +82,67 @@ test("第三方来源单独候选不会触发自动确认", () => {
   ]);
 
   assert.equal(result, null);
+});
+
+test("证据状态会按来源可信度分级", () => {
+  const official = evidenceFromCandidate("2026-06", {
+    code: "火焰鸟",
+    sourceKey: "official_telegram",
+    sourceName: "官方 Telegram 通知频道",
+    sourceType: "official_telegram",
+    sourceUrl: "https://t.me/s/pokemon521",
+    confidence: 1,
+    evidenceCount: 1,
+    evidence: "官方明确文本"
+  });
+  const community = evidenceFromCandidate("2026-06", {
+    code: "火焰鸟",
+    sourceKey: "linuxdo_monthly_topic",
+    sourceName: "LINUX DO 月度讨论帖",
+    sourceType: "linuxdo_topic",
+    sourceUrl: "https://linux.do/t/topic/2289939",
+    confidence: 0.88,
+    evidenceCount: 6,
+    evidence: "多人兑换成功"
+  });
+  const thirdParty = evidenceFromCandidate("2026-06", {
+    code: "火焰鸟",
+    sourceKey: "third_party_page",
+    sourceName: "第三方页面",
+    sourceType: "third_party_html",
+    sourceUrl: "https://example.com/code",
+    confidence: 0.52,
+    evidenceCount: 1,
+    evidence: "第三方报告"
+  });
+
+  assert.equal(official.status, "official_notice");
+  assert.equal(official.confidenceScore, 70);
+  assert.equal(community.status, "corroborated");
+  assert.equal(community.confidenceScore, 55);
+  assert.equal(thirdParty.status, "reported");
+  assert.equal(thirdParty.confidenceScore, 18);
+});
+
+test("官方谜题图片会保存为无兑换码的官方公告证据", () => {
+  const evidence = evidenceFromPuzzle("2026-06", {
+    source_key: "official_telegram",
+    source_type: "official_telegram"
+  }, {
+    imageUrl: "https://cdn4.telesco.pe/file/puzzle.jpg",
+    postUrl: "https://t.me/pokemon521/365"
+  });
+
+  assert.equal(evidence.code, null);
+  assert.equal(evidence.status, "official_notice");
+  assert.equal(evidence.sourceUrl, "https://cdn4.telesco.pe/file/puzzle.jpg");
+  assert.equal(evidence.referenceUrl, "https://t.me/pokemon521/365");
+});
+
+test("可信度标签面向普通用户表达验证阶段", () => {
+  assert.equal(trustLabelForStatus("checkout_verified"), "已验证");
+  assert.equal(trustLabelForStatus("reported"), "第三方报告，建议结算前确认");
+  assert.equal(trustLabelForStatus("candidate"), "候选线索，等待复核");
 });
 
 test("fetchTopic 会按 post_stream.stream 加载后续评论", async () => {

@@ -1,6 +1,7 @@
 const LINUXDO_BASE = "https://linux.do";
 const OFFICIAL_CHANNEL_URL = "https://t.me/s/pokemon521";
 const OFFICIAL_GROUP_URL = "https://t.me/pokemon_love";
+const POKEMON_PROVIDER_KEY = "pokemon_nebula";
 const MAX_TOPIC_POSTS = 240;
 const TOPIC_POST_BATCH_SIZE = 40;
 const CN_MONTHS = [
@@ -308,6 +309,7 @@ async function saveCandidate(env, period, item) {
       evidence = excluded.evidence,
       updated_at = CURRENT_TIMESTAMP
   `).bind(period, item.code, item.sourceKey, item.sourceName, item.sourceType, item.sourceUrl, item.confidence, item.evidenceCount, item.evidence).run();
+  await tryRecordEvidence(env, evidenceFromCandidate(period, item));
 }
 
 async function sourceCheck(env, source, period, result, message, candidateCount = 0, sourceUrl = source.url) {
@@ -328,6 +330,27 @@ async function enabledSources(env) {
 async function listCandidates(env, period) {
   const { results } = await env.DB.prepare(`SELECT period, code, source_key, source_name, source_type, source_url, confidence, evidence_count, evidence, updated_at FROM code_candidates WHERE period = ? ORDER BY confidence DESC, evidence_count DESC, updated_at DESC`).bind(period).all();
   return results;
+}
+
+async function listOffers(env, period) {
+  const { results } = await env.DB.prepare(`
+    SELECT period, code, offer_type, discount_value, plan_name, status, confidence_score, source_count, first_seen_at, last_seen_at, last_verified_at, updated_at
+    FROM offers
+    WHERE period = ?
+    ORDER BY confidence_score DESC, source_count DESC, updated_at DESC
+  `).bind(period).all();
+  return results.map((item) => ({ ...item, trust_label: trustLabelForStatus(item.status) }));
+}
+
+async function listEvidence(env, period) {
+  const { results } = await env.DB.prepare(`
+    SELECT period, code, source_key, source_type, source_url, reference_url, is_official, status, confidence_score, evidence_excerpt, extraction_method, verification_method, reviewer, created_at
+    FROM offer_evidence
+    WHERE period = ?
+    ORDER BY id DESC
+    LIMIT 80
+  `).bind(period).all();
+  return results.map((item) => ({ ...item, trust_label: trustLabelForStatus(item.status) }));
 }
 
 function verifiedFrom(items) {
@@ -387,6 +410,7 @@ async function collectSource(env, source, period, now, topicUrl = null) {
     const items = explicitCandidates(scoped, source, source.source_type === "official_telegram" ? 1 : 0.52);
     for (const item of items) await saveCandidate(env, period, item);
     const puzzleImage = source.source_type === "official_telegram" ? extractTelegramPuzzleImage(text) : null;
+    if (puzzleImage) await tryRecordEvidence(env, evidenceFromPuzzle(period, source, puzzleImage));
     const puzzle = source.source_type === "official_telegram" && stripHtml(text).includes("猜猜我是谁");
     await sourceCheck(
       env,
@@ -452,9 +476,32 @@ async function body(request) {
 async function latest(env) {
   const period = periodOf();
   const current = await env.DB.prepare(`SELECT period, code, status, confidence, evidence_count, source_url, source_title, updated_at FROM codes WHERE period = ? LIMIT 1`).bind(period).first();
-  if (current) return { found: true, isCurrentMonth: true, item: current };
+  if (current) return { found: true, isCurrentMonth: true, item: await enrichCodeWithOffer(env, current) };
   const item = await env.DB.prepare(`SELECT period, code, status, confidence, evidence_count, source_url, source_title, updated_at FROM codes WHERE status = 'verified' ORDER BY period DESC LIMIT 1`).first();
-  return item ? { found: true, isCurrentMonth: false, item } : { found: false, isCurrentMonth: false, item: null };
+  return item ? { found: true, isCurrentMonth: false, item: await enrichCodeWithOffer(env, item) } : { found: false, isCurrentMonth: false, item: null };
+}
+
+async function enrichCodeWithOffer(env, item) {
+  try {
+    const offer = await env.DB.prepare(`
+      SELECT status AS offer_status, confidence_score, source_count, last_seen_at, last_verified_at
+      FROM offers
+      WHERE provider_key = ? AND period = ? AND code = ?
+      LIMIT 1
+    `).bind(POKEMON_PROVIDER_KEY, item.period, item.code).first();
+    if (!offer) return item;
+    return {
+      ...item,
+      offer_status: offer.offer_status,
+      trust_label: trustLabelForStatus(offer.offer_status),
+      confidence_score: offer.confidence_score,
+      source_count: offer.source_count,
+      last_seen_at: offer.last_seen_at,
+      last_verified_at: offer.last_verified_at
+    };
+  } catch {
+    return item;
+  }
 }
 
 async function manual(env, data) {
@@ -463,6 +510,23 @@ async function manual(env, data) {
   if (!plausibleCode(code)) throw new Error("兑换码格式不正确");
   const sourceUrl = data.sourceUrl ? safeUrl(data.sourceUrl) : null;
   await upsertCode(env, period, { code, confidence: 1, evidenceCount: 1, sourceUrl, sourceTitle: "管理员手动确认" });
+  await tryRecordEvidence(env, {
+    providerKey: POKEMON_PROVIDER_KEY,
+    period,
+    code,
+    sourceKey: "manual_admin",
+    sourceType: "manual",
+    sourceUrl: sourceUrl ?? "https://pokemon-code-index.xf959211192.workers.dev/admin.html",
+    referenceUrl: sourceUrl,
+    isOfficial: 0,
+    status: "checkout_verified",
+    confidenceScore: 90,
+    evidenceExcerpt: "管理员手动补录并确认",
+    evidenceHash: hashText([POKEMON_PROVIDER_KEY, period, code, sourceUrl ?? "manual_admin"].join("|")),
+    extractionMethod: "manual_entry",
+    verificationMethod: "manual_admin",
+    reviewer: "admin"
+  });
   await log(env, period, "manual_write", "updated", `管理员手动写入 ${period} 兑换码：${code}`, sourceUrl);
   return { ok: true, period, code };
 }
@@ -483,6 +547,185 @@ async function testTopic(data) {
       ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}`
       : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
   };
+}
+
+function hashText(value = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function trustLabelForStatus(status = "") {
+  const labels = {
+    checkout_verified: "已验证",
+    official_notice: "官方或关联公告出现",
+    corroborated: "多来源或社区共识",
+    reported: "第三方报告，建议结算前确认",
+    candidate: "候选线索，等待复核",
+    expired: "已失效",
+    unknown: "暂未确认"
+  };
+  return labels[status] ?? "暂未确认";
+}
+
+function rankStatus(status = "") {
+  const ranks = {
+    candidate: 1,
+    unknown: 1,
+    reported: 2,
+    corroborated: 3,
+    official_notice: 4,
+    checkout_verified: 5,
+    expired: 0
+  };
+  return ranks[status] ?? 1;
+}
+
+function candidateEvidenceStatus(item) {
+  if (item.sourceKey === "official_telegram" && Number(item.confidence) >= 0.95) return "official_notice";
+  if (item.sourceKey === "linuxdo_monthly_topic" && Number(item.evidenceCount) >= 4) return "corroborated";
+  if (String(item.sourceType ?? "").startsWith("third_party")) return "reported";
+  return "candidate";
+}
+
+function confidenceScoreForEvidence(status, item = {}) {
+  const base = {
+    checkout_verified: 90,
+    official_notice: 70,
+    corroborated: 55,
+    reported: 18,
+    candidate: 8,
+    unknown: 5,
+    expired: 0
+  }[status] ?? 8;
+  if (status === "corroborated") return Math.min(69, base + Math.max(0, Number(item.evidenceCount ?? 0) - 6) * 2);
+  if (status === "reported") return Math.min(39, base + Math.max(0, Number(item.evidenceCount ?? 0) - 1) * 2);
+  return base;
+}
+
+function evidenceFromCandidate(period, item) {
+  const status = candidateEvidenceStatus(item);
+  const sourceUrl = safeUrl(item.sourceUrl);
+  const evidenceExcerpt = snippet(item.evidence || item.sourceName || item.code, 260);
+  const hashBase = [
+    POKEMON_PROVIDER_KEY,
+    period,
+    item.code,
+    item.sourceKey,
+    sourceUrl,
+    evidenceExcerpt
+  ].join("|");
+  return {
+    providerKey: POKEMON_PROVIDER_KEY,
+    period,
+    code: item.code,
+    sourceKey: item.sourceKey,
+    sourceType: item.sourceType,
+    sourceUrl,
+    referenceUrl: null,
+    isOfficial: item.sourceKey === "official_telegram" ? 1 : 0,
+    status,
+    confidenceScore: confidenceScoreForEvidence(status, item),
+    evidenceExcerpt,
+    evidenceHash: hashText(hashBase),
+    extractionMethod: item.sourceKey === "linuxdo_monthly_topic" ? "linuxdo_public_topic" : "public_page_text",
+    verificationMethod: status === "official_notice" ? "official_notice" : "source_tracking",
+    reviewer: null
+  };
+}
+
+function evidenceFromPuzzle(period, source, puzzleImage) {
+  const sourceUrl = safeUrl(puzzleImage.imageUrl);
+  const referenceUrl = puzzleImage.postUrl ? safeUrl(puzzleImage.postUrl) : source.url;
+  const evidenceExcerpt = "官方频道发布猜图兑换活动图片；图片仅作为谜题证据，兑换码需社区答案或人工确认";
+  return {
+    providerKey: POKEMON_PROVIDER_KEY,
+    period,
+    code: null,
+    sourceKey: source.source_key,
+    sourceType: source.source_type,
+    sourceUrl,
+    referenceUrl,
+    isOfficial: 1,
+    status: "official_notice",
+    confidenceScore: 30,
+    evidenceExcerpt,
+    evidenceHash: hashText([POKEMON_PROVIDER_KEY, period, source.source_key, sourceUrl, referenceUrl].join("|")),
+    extractionMethod: "telegram_public_preview_image",
+    verificationMethod: "manual_required",
+    reviewer: null
+  };
+}
+
+async function recordEvidence(env, evidence) {
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO offer_evidence(
+      provider_key, period, code, source_key, source_type, source_url, reference_url, is_official,
+      status, confidence_score, evidence_excerpt, evidence_hash, extraction_method, verification_method, reviewer
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    evidence.providerKey,
+    evidence.period,
+    evidence.code,
+    evidence.sourceKey,
+    evidence.sourceType,
+    evidence.sourceUrl,
+    evidence.referenceUrl,
+    evidence.isOfficial,
+    evidence.status,
+    evidence.confidenceScore,
+    evidence.evidenceExcerpt,
+    evidence.evidenceHash,
+    evidence.extractionMethod,
+    evidence.verificationMethod,
+    evidence.reviewer
+  ).run();
+
+  if (!evidence.code) return;
+
+  const current = await env.DB.prepare(`
+    SELECT status, confidence_score FROM offers
+    WHERE provider_key = ? AND period = ? AND code = ?
+    LIMIT 1
+  `).bind(evidence.providerKey, evidence.period, evidence.code).first();
+  const nextStatus = !current || rankStatus(evidence.status) >= rankStatus(current.status)
+    ? evidence.status
+    : current.status;
+  const nextScore = Math.max(Number(current?.confidence_score ?? 0), evidence.confidenceScore);
+  const sourceCount = await env.DB.prepare(`
+    SELECT COUNT(DISTINCT COALESCE(source_key, source_url)) AS count
+    FROM offer_evidence
+    WHERE provider_key = ? AND period = ? AND code = ?
+  `).bind(evidence.providerKey, evidence.period, evidence.code).first();
+
+  await env.DB.prepare(`
+    INSERT INTO offers(provider_key, period, code, status, confidence_score, source_count, last_seen_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(provider_key, period, code) DO UPDATE SET
+      status = excluded.status,
+      confidence_score = excluded.confidence_score,
+      source_count = excluded.source_count,
+      last_seen_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(
+    evidence.providerKey,
+    evidence.period,
+    evidence.code,
+    nextStatus,
+    nextScore,
+    Number(sourceCount?.count ?? 1)
+  ).run();
+}
+
+async function tryRecordEvidence(env, evidence) {
+  try {
+    await recordEvidence(env, evidence);
+  } catch (error) {
+    console.warn("record_evidence_failed", error instanceof Error ? error.message : String(error));
+  }
 }
 
 export default {
@@ -512,6 +755,8 @@ export default {
       }
       if (url.pathname === "/api/admin/logs" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
       if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: periodOf(), items: await listCandidates(env, periodOf()) });
+      if (url.pathname === "/api/admin/offers" && request.method === "GET") return json({ period: periodOf(), items: await listOffers(env, periodOf()) });
+      if (url.pathname === "/api/admin/evidence" && request.method === "GET") return json({ period: periodOf(), items: await listEvidence(env, periodOf()) });
       if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.source_url AS last_source_url, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
       if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
         const data = await body(request);
@@ -529,4 +774,18 @@ export default {
   }
 };
 
-export { buildHealth, discoverTopic, extractTelegramPuzzleImage, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, topicSearchQueries, verifiedFrom };
+export {
+  buildHealth,
+  discoverTopic,
+  evidenceFromCandidate,
+  evidenceFromPuzzle,
+  extractTelegramPuzzleImage,
+  fetchTopic,
+  fetchTopicPosts,
+  inAutoWindow,
+  periodOf,
+  testTopic,
+  topicSearchQueries,
+  trustLabelForStatus,
+  verifiedFrom
+};
