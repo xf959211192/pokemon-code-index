@@ -156,6 +156,31 @@ function explicitCandidates(text, source, confidence) {
   return [...map.values()];
 }
 
+function normalizeTelegramAssetUrl(value) {
+  if (!value) return null;
+  if (value.startsWith("//")) return `https:${value}`;
+  if (value.startsWith("https://")) return value;
+  return null;
+}
+
+function extractTelegramPuzzleImage(html = "") {
+  const text = String(html);
+  const blocks = text.match(/<div class="tgme_widget_message_wrap[\s\S]*?(?=<div class="tgme_widget_message_wrap|<\/section>)/g) ?? [text];
+  for (const block of blocks) {
+    const plain = stripHtml(block);
+    if (!plain.includes("猜猜我是谁")) continue;
+    const anchor = block.match(/<a[^>]+class="[^"]*tgme_widget_message_photo_wrap[^"]*"[^>]*>/i)?.[0] ?? "";
+    const postUrl = anchor.match(/href="([^"]+)"/i)?.[1] ?? "";
+    const imageUrl = normalizeTelegramAssetUrl(anchor.match(/background-image:url\(['"]?([^'")]+)['"]?\)/i)?.[1] ?? "");
+    if (!imageUrl) continue;
+    return {
+      imageUrl,
+      postUrl
+    };
+  }
+  return null;
+}
+
 function monthSearchTerms(month) {
   const padded = String(month).padStart(2, "0");
   const cn = CN_MONTHS[month];
@@ -361,8 +386,19 @@ async function collectSource(env, source, period, now, topicUrl = null) {
     const scoped = source.source_type.startsWith("third_party") ? stripHtml(text).slice(0, 5000) : text;
     const items = explicitCandidates(scoped, source, source.source_type === "official_telegram" ? 1 : 0.52);
     for (const item of items) await saveCandidate(env, period, item);
+    const puzzleImage = source.source_type === "official_telegram" ? extractTelegramPuzzleImage(text) : null;
     const puzzle = source.source_type === "official_telegram" && stripHtml(text).includes("猜猜我是谁");
-    await sourceCheck(env, source, period, items.length ? "candidate_found" : "checked", items.length ? `发现 ${items.length} 个明确文本候选` : (puzzle ? "发现官方谜题公告，需要社区答案或人工确认" : "未发现明确文本兑换码"), items.length);
+    await sourceCheck(
+      env,
+      source,
+      period,
+      items.length ? "candidate_found" : (puzzle ? "puzzle_found" : "checked"),
+      items.length
+        ? `发现 ${items.length} 个明确文本候选`
+        : (puzzleImage ? "发现官方谜题公告，已记录谜题图片，需要社区答案或人工确认" : (puzzle ? "发现官方谜题公告，需要社区答案或人工确认" : "未发现明确文本兑换码")),
+      items.length,
+      puzzleImage?.imageUrl ?? source.url
+    );
   } catch (error) {
     await sourceCheck(env, source, period, "error", error instanceof Error ? error.message : String(error));
   }
@@ -476,7 +512,7 @@ export default {
       }
       if (url.pathname === "/api/admin/logs" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
       if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: periodOf(), items: await listCandidates(env, periodOf()) });
-      if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
+      if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.source_url AS last_source_url, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
       if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
         const data = await body(request);
         const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`).bind(data.enabled ? 1 : 0, String(data.sourceKey ?? "")).run();
@@ -493,4 +529,4 @@ export default {
   }
 };
 
-export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, topicSearchQueries, verifiedFrom };
+export { buildHealth, discoverTopic, extractTelegramPuzzleImage, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, topicSearchQueries, verifiedFrom };

@@ -143,6 +143,20 @@
       return cell;
     }
 
+    function sourceResultCell(item) {
+      const cell = td(item.last_message || "尚未检查");
+      if (item.last_source_url && item.last_source_url !== item.url) {
+        cell.appendChild(document.createTextNode(" "));
+        const link = document.createElement("a");
+        link.href = item.last_source_url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = "查看图片";
+        cell.appendChild(link);
+      }
+      return cell;
+    }
+
     async function loadSources() {
       const data = await read("/api/admin/sources");
       el("sourceBody").replaceChildren(...(data.items || []).map((item) => {
@@ -151,7 +165,7 @@
         row.appendChild(td(item.source_type));
         row.appendChild(td(item.enabled ? "已启用" : "已停用"));
         row.appendChild(td(item.last_checked_at || "--"));
-        row.appendChild(td(item.last_message || "尚未检查"));
+        row.appendChild(sourceResultCell(item));
         const action = document.createElement("td");
         const button = document.createElement("button");
         button.className = "small secondary";

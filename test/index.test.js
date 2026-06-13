@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { buildHealth, discoverTopic, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
+import worker, { buildHealth, discoverTopic, extractTelegramPuzzleImage, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
 
 function createDb({ hasVerified = false, fail = false } = {}) {
   return {
@@ -206,4 +206,25 @@ test("管理员测试帖子接口只分析不写数据库", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("extractTelegramPuzzleImage 能从官方谜题公告中提取图片", () => {
+  const html = `
+    <div class="tgme_widget_message_wrap js-widget_message_wrap">
+      <div class="tgme_widget_message" data-post="pokemon521/365">
+        <a class="tgme_widget_message_photo_wrap" href="https://t.me/pokemon521/365"
+          style="width:800px;background-image:url('https://cdn4.telesco.pe/file/puzzle.jpg')">
+          <div class="tgme_widget_message_photo"></div>
+        </a>
+        <div class="tgme_widget_message_text js-message_text" dir="auto">
+          六月份免费优惠码 之猜猜我是谁<br/>使用教程：猜出来名字
+        </div>
+      </div>
+    </div>
+  `;
+
+  assert.deepEqual(extractTelegramPuzzleImage(html), {
+    imageUrl: "https://cdn4.telesco.pe/file/puzzle.jpg",
+    postUrl: "https://t.me/pokemon521/365"
+  });
 });
