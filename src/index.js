@@ -398,6 +398,24 @@ async function manual(env, data) {
   return { ok: true, period, code };
 }
 
+async function testTopic(data) {
+  const topicUrl = String(data.topicUrl ?? "").trim();
+  if (!topicUrl) throw new Error("请先填写 LINUX DO 帖子地址");
+  const topic = await fetchTopic(topicUrl);
+  const candidate = communityCandidate(topic);
+  return {
+    ok: true,
+    url: topic.url,
+    title: topic.title,
+    postCount: topic.posts.length,
+    maxPostCount: MAX_TOPIC_POSTS,
+    candidate,
+    message: candidate
+      ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}`
+      : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
+  };
+}
+
 export default {
   async fetch(request, env) {
     try {
@@ -414,6 +432,10 @@ export default {
         const data = await body(request);
         const result = await refresh(env, { force: true, triggerType: "manual_refresh", topicUrl: data.topicUrl || null });
         return json(result, result.ok ? 200 : 422);
+      }
+      if (url.pathname === "/api/admin/test-topic" && request.method === "POST") {
+        try { return json(await testTopic(await body(request))); }
+        catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
       }
       if (url.pathname === "/api/admin/manual" && request.method === "POST") {
         try { return json(await manual(env, await body(request))); }
@@ -438,4 +460,4 @@ export default {
   }
 };
 
-export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, verifiedFrom };
+export { buildHealth, discoverTopic, fetchTopic, fetchTopicPosts, inAutoWindow, periodOf, testTopic, verifiedFrom };

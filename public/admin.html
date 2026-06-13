@@ -46,6 +46,7 @@
         <h2>强制刷新</h2>
         <p class="sub">留空时自动检查全部启用来源。填写后，LINUX DO 来源会直接抓取指定公开帖子；其他启用来源仍会正常检查。</p>
         <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/2289939" /></label>
+        <button id="testTopic" class="secondary">测试帖子识别</button>
         <button id="refresh">立即刷新全部来源</button>
       </section>
 
@@ -209,6 +210,14 @@
     el("checkHealth").addEventListener("click", async () => {
       try {
         output(await read("/api/health"));
+      } catch (error) {
+        output({ ok: false, message: error.message });
+      }
+    });
+
+    el("testTopic").addEventListener("click", async () => {
+      try {
+        await post("/api/admin/test-topic", { topicUrl: el("topicUrl").value.trim() || null });
       } catch (error) {
         output({ ok: false, message: error.message });
       }

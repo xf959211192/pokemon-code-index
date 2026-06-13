@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildHealth, discoverTopic, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
+import worker, { buildHealth, discoverTopic, fetchTopic, periodOf, verifiedFrom } from "../src/index.js";
 
 function createDb({ hasVerified = false, fail = false } = {}) {
   return {
@@ -122,6 +122,64 @@ test("discoverTopic 兼容中文月份标题", async () => {
       url: "https://linux.do/t/topic/11",
       title: "宝可梦机场六月免费兑换码，猜猜我是谁"
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("管理员测试帖子接口只分析不写数据库", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/t/topic/2289939.json")) {
+      return Response.json({
+        title: "宝可梦机场六月免费兑换码",
+        post_stream: {
+          stream: [1, 2, 3],
+          posts: [{ id: 1, cooked: "主帖" }]
+        }
+      });
+    }
+    return Response.json({
+      post_stream: {
+        posts: [
+          { id: 2, cooked: "兑换码：火焰鸟" },
+          { id: 3, cooked: "火焰鸟兑换成功" }
+        ]
+      }
+    });
+  };
+
+  const env = {
+    ADMIN_TOKEN: "local-test-token",
+    DB: {
+      prepare() {
+        throw new Error("测试帖子接口不应访问数据库");
+      }
+    },
+    ASSETS: {
+      fetch() {
+        throw new Error("测试帖子接口不应访问静态资源");
+      }
+    }
+  };
+
+  try {
+    const response = await worker.fetch(new Request("https://example.test/api/admin/test-topic", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer local-test-token",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ topicUrl: "https://linux.do/t/topic/2289939" })
+    }), env);
+    const data = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(data.ok, true);
+    assert.equal(data.url, "https://linux.do/t/topic/2289939");
+    assert.equal(data.postCount, 3);
+    assert.equal(data.candidate.code, "火焰鸟");
+    assert.equal(data.candidate.evidenceCount, 6);
   } finally {
     globalThis.fetch = originalFetch;
   }
