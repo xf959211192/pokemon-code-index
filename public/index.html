@@ -25,6 +25,12 @@
     .links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
     .links a { display: inline-block; border-radius: 999px; padding: 8px 11px; background: #eef4fb; text-decoration: none; font-size: 13px; }
     .footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 18px; color: #728197; font-size: 13px; }
+    .history-card { margin-top: 16px; border-radius: 18px; padding: 20px; }
+    .history-title { margin: 0 0 12px; font-size: 18px; }
+    .history-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .history-item { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid #edf1f5; font-size: 14px; }
+    .history-code { color: #172033; font-weight: 700; overflow-wrap: anywhere; }
+    .history-status { color: #66768c; text-align: right; }
   </style>
 </head>
 <body>
@@ -60,6 +66,11 @@
         <a href="/admin.html">管理</a>
       </div>
     </section>
+
+    <section class="card history-card">
+      <h2 class="history-title">最近 5 个月</h2>
+      <ul id="historyList" class="history-list"></ul>
+    </section>
   </main>
 
   <script>
@@ -92,15 +103,48 @@
       return title || "已确认";
     }
 
+    function recentPeriods(count = 5) {
+      const now = new Date();
+      const china = new Date(now.getTime() + 8 * 3600_000);
+      const year = china.getUTCFullYear();
+      const month = china.getUTCMonth();
+      return Array.from({ length: count }, (_, index) => {
+        const date = new Date(Date.UTC(year, month - index, 1));
+        return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+      });
+    }
+
+    function renderHistory(items = []) {
+      const byPeriod = new Map(items.map((item) => [item.period, item]));
+      const rows = recentPeriods(5).map((period) => {
+        const item = byPeriod.get(period);
+        const row = document.createElement("li");
+        row.className = "history-item";
+        const periodCell = document.createElement("span");
+        periodCell.textContent = period;
+        const codeCell = document.createElement("span");
+        codeCell.className = "history-code";
+        codeCell.textContent = item?.code || "暂未收集到";
+        const statusCell = document.createElement("span");
+        statusCell.className = "history-status";
+        statusCell.textContent = item ? (item.status === "verified" ? "已确认" : item.status) : "--";
+        row.append(periodCell, codeCell, statusCell);
+        return row;
+      });
+      el("historyList").replaceChildren(...rows);
+    }
+
     async function load() {
       try {
-        const [data, links] = await Promise.all([
+        const [data, links, history] = await Promise.all([
           readJson("/api/latest"),
-          readJson("/api/public-links")
+          readJson("/api/public-links"),
+          readJson("/api/history")
         ]);
 
         if (links.officialChannel) el("officialChannel").href = links.officialChannel;
         if (links.officialGroup) el("officialGroup").href = links.officialGroup;
+        renderHistory(history.items || []);
 
         if (!data.found || !data.item) {
           el("code").textContent = "暂未找到";
