@@ -39,6 +39,7 @@
       <a class="button" href="/">返回首页</a>
       <button id="checkHealth" class="secondary">检查服务状态</button>
       <button id="runDiscovery" class="secondary">搜索发现入口</button>
+      <button id="backfillRecent" class="secondary">回填最近 5 个月</button>
       <button id="reloadAll" class="secondary">刷新后台数据</button>
     </section>
 
@@ -321,6 +322,14 @@
     el("runDiscovery").addEventListener("click", async () => {
       try {
         await post("/api/admin/discover", {});
+      } finally {
+        await reloadAll();
+      }
+    });
+
+    el("backfillRecent").addEventListener("click", async () => {
+      try {
+        await post("/api/admin/backfill-recent", { months: 5 });
       } finally {
         await reloadAll();
       }

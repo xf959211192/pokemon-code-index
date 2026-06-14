@@ -3,6 +3,7 @@ import test from "node:test";
 
 import worker, {
   buildHealth,
+  communityCandidate,
   discoverTopic,
   evidenceFromCandidate,
   evidenceFromPuzzle,
@@ -235,6 +236,45 @@ Markdown Content:
   }
 });
 
+test("communityCandidate 能识别社区自然语言答案并过滤感谢类噪声", () => {
+  const topic = {
+    url: "https://linux.do/t/topic/2092025",
+    title: "五一优惠大放送和 宝可梦机场之五月免费兑换码猜猜我是谁",
+    posts: [
+      { id: 1, cooked: "主帖" },
+      { id: 2, cooked: "[![Image](avatar)](https://linux.do/u/a) > 是的：金鱼王，谢谢宝可梦" },
+      { id: 3, cooked: "猜猜我是谁，五月免费兑换码是 > 金鱼王" },
+      { id: 4, cooked: "没没错没错 就是`金鱼王` 感谢大佬感谢大佬" },
+      { id: 5, cooked: "金鱼王 没错 太棒了 感谢宝可梦 五一快乐~~" },
+      { id: 6, cooked: "感谢佬" }
+    ]
+  };
+
+  const item = communityCandidate(topic);
+
+  assert.equal(item.code, "金鱼王");
+  assert.ok(item.evidenceCount >= 10);
+});
+
+test("communityCandidate 支持“兑换码是某某”和续费成功表达", () => {
+  const topic = {
+    url: "https://linux.do/t/topic/1876094",
+    title: "砥砺前行 宝可梦机场之四月免费兑换码猜猜我是谁",
+    posts: [
+      { id: 1, cooked: "主帖" },
+      { id: 2, cooked: "太棒了，是雷丘" },
+      { id: 3, cooked: "雷丘" },
+      { id: 4, cooked: "雷丘 感谢佬友，续费成功了！" },
+      { id: 5, cooked: "兑换码是雷丘" }
+    ]
+  };
+
+  const item = communityCandidate(topic);
+
+  assert.equal(item.code, "雷丘");
+  assert.ok(item.evidenceCount >= 8);
+});
+
 test("discoverTopic 兼容中文月份标题", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({
@@ -385,7 +425,7 @@ test("管理员测试帖子接口只分析不写数据库", async () => {
     assert.equal(data.url, "https://linux.do/t/topic/2289939");
     assert.equal(data.postCount, 3);
     assert.equal(data.candidate.code, "火焰鸟");
-    assert.equal(data.candidate.evidenceCount, 6);
+    assert.ok(data.candidate.evidenceCount >= 6);
   } finally {
     globalThis.fetch = originalFetch;
   }

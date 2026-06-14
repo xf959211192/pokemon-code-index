@@ -6,9 +6,36 @@ const JINA_READER_BASE = "https://r.jina.ai/http://";
 const MAX_TOPIC_POSTS = 240;
 const TOPIC_POST_BATCH_SIZE = 40;
 const MAX_DISCOVERY_QUERIES = 28;
-const MAX_READER_TOPIC_PAGES = 3;
+const MAX_READER_TOPIC_PAGES = 12;
 const MAX_CATEGORY_DISCOVERY_PAGES = 16;
-const CATEGORY_DISCOVERY_BATCH_SIZE = 16;
+const CATEGORY_DISCOVERY_BATCH_SIZE = 4;
+const MAX_BACKFILL_MONTHS = 12;
+const KNOWN_LINUXDO_TOPICS = {
+  "2026-02": {
+    url: "https://linux.do/t/topic/1550007",
+    title: "宝可梦机场之二月优惠码猜猜我是谁！"
+  },
+  "2026-04": {
+    url: "https://linux.do/t/topic/1876094",
+    title: "砥砺前行 宝可梦机场之四月免费兑换码猜猜我是谁"
+  },
+  "2026-05": {
+    url: "https://linux.do/t/topic/2092025",
+    title: "五一优惠大放送和 宝可梦机场之五月免费兑换码猜猜我是谁"
+  },
+  "2026-06": {
+    url: "https://linux.do/t/topic/2289939",
+    title: "宝可梦机场之六月免费兑换码猜猜我是谁"
+  }
+};
+const KNOWN_PUBLIC_MIRROR_CODES = {
+  "2026-03": {
+    code: "a732f321-8939-43cc-97b8-e2af81487dab",
+    sourceUrl: "https://t.me/s/linux_do_channel?after=315051",
+    sourceName: "LINUX DO 公开 Telegram 镜像",
+    evidence: "千夜在“宝可梦机场之三月免费兑换码猜猜我是谁”中发帖：[a732f321-8939-43cc-97b8-e2af81487dab]"
+  }
+};
 const CN_MONTHS = [
   "",
   "一",
@@ -27,7 +54,8 @@ const CN_MONTHS = [
 
 const STOP_WORDS = new Set([
   "感谢", "谢谢", "支持", "兑换", "成功", "宝可梦", "火烈鸟", "兑换码", "优惠码",
-  "白嫖码", "礼品卡", "猜猜我是谁", "管理员手动确认", "来了", "大佬", "本月"
+  "白嫖码", "礼品卡", "猜猜我是谁", "管理员手动确认", "来了", "大佬", "本月",
+  "感谢佬", "感谢大佬", "感谢佬友", "谢谢佬", "前排支持", "五一快乐", "使用方法"
 ]);
 
 const DEFAULT_PROVIDER = {
@@ -140,8 +168,9 @@ function plausibleCode(value) {
   const code = String(value ?? "").trim();
   return Boolean(
     code &&
-    /^([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})$/.test(code) &&
-    !STOP_WORDS.has(code)
+    /^([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32}|[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12})$/.test(code) &&
+    !STOP_WORDS.has(code) &&
+    !/(感谢|谢谢|支持|大佬|佬友|前排|优惠|兑换|白嫖|礼品|套餐|使用|输入|官网|备用|机场|免费|成功|失败|快乐|答案|正确|这个|那个|来了)/.test(code)
   );
 }
 
@@ -285,8 +314,10 @@ function topicSearchQueries(year, month, provider = DEFAULT_PROVIDER) {
 }
 
 function scoreTopicTitle(title, monthTerms) {
+  if (!title.includes("宝可梦")) return 0;
+  if (!monthTerms.some((term) => title.includes(term))) return 0;
   let score = 0;
-  if (monthTerms.some((term) => title.includes(term))) score += 6;
+  score += 8;
   if (/兑换码|优惠码|白嫖码|免费码/.test(title)) score += 4;
   if (/猜猜我是谁|答案|谜题/.test(title)) score += 3;
   if (/宝可梦机场|宝可梦星云/.test(title)) score += 2;
@@ -311,6 +342,7 @@ async function discoverTopicFromCategory(now, provider, onDiscovery) {
   const { month } = chinaParts(now);
   const monthTerms = monthSearchTerms(month);
   const seen = new Map();
+  const seedTopics = new Map();
   for (let page = 1; page <= MAX_CATEGORY_DISCOVERY_PAGES; page += CATEGORY_DISCOVERY_BATCH_SIZE) {
     const batch = Array.from(
       { length: Math.min(CATEGORY_DISCOVERY_BATCH_SIZE, MAX_CATEGORY_DISCOVERY_PAGES - page + 1) },
@@ -323,8 +355,9 @@ async function discoverTopicFromCategory(now, provider, onDiscovery) {
     for (const result of settled) {
       if (result.status !== "fulfilled") continue;
       for (const item of parseCategoryTopics(result.value.body)) {
-        if (!item.title.includes("宝可梦")) continue;
+        if (item.title.includes("宝可梦")) seedTopics.set(item.id, item);
         const score = scoreTopicTitle(item.title, monthTerms);
+        if (!score) continue;
         if (onDiscovery) {
           await onDiscovery({
             providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
@@ -340,9 +373,54 @@ async function discoverTopicFromCategory(now, provider, onDiscovery) {
         if (!current || score > current.score) seen.set(item.id, { id: item.id, title: item.title, score });
       }
     }
+    const rankedInBatch = [...seen.values()].sort((a, b) => b.score - a.score);
+    if (rankedInBatch[0] && rankedInBatch[0].score >= 6) {
+      return { url: `${LINUXDO_BASE}/t/topic/${rankedInBatch[0].id}`, title: rankedInBatch[0].title };
+    }
+    if (seedTopics.size) {
+      const related = await discoverTopicFromRelatedSeeds(now, provider, [...seedTopics.values()].slice(0, 8), onDiscovery);
+      if (related) return related;
+    }
   }
   const ranked = [...seen.values()].sort((a, b) => b.score - a.score);
+  if (!ranked[0] && seedTopics.size) {
+    const related = await discoverTopicFromRelatedSeeds(now, provider, [...seedTopics.values()].slice(0, 8), onDiscovery);
+    if (related) return related;
+  }
   if (!ranked[0] || ranked[0].score < 6) throw new Error("没有在福利羊毛分类发现本月公开帖子");
+  return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
+}
+
+async function discoverTopicFromRelatedSeeds(now, provider, seeds, onDiscovery) {
+  const { month } = chinaParts(now);
+  const monthTerms = monthSearchTerms(month);
+  const seen = new Map();
+  const settled = await Promise.allSettled(seeds.map((seed) => {
+    const pageUrl = `${LINUXDO_BASE}/t/topic/${seed.id}`;
+    return fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 12000).then((body) => ({ seed, body }));
+  }));
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    for (const item of parseCategoryTopics(result.value.body)) {
+      const score = scoreTopicTitle(item.title, monthTerms);
+      if (!score) continue;
+      if (onDiscovery) {
+        await onDiscovery({
+          providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
+          period: periodOf(now),
+          kind: "linuxdo_related_topic",
+          query: result.value.seed.url,
+          title: item.title,
+          sourceUrl: item.url,
+          score
+        });
+      }
+      const current = seen.get(item.id);
+      if (!current || score > current.score) seen.set(item.id, { id: item.id, title: item.title, score });
+    }
+  }
+  const ranked = [...seen.values()].sort((a, b) => b.score - a.score);
+  if (!ranked[0] || ranked[0].score < 6) return null;
   return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
 }
 
@@ -358,8 +436,8 @@ async function discoverTopic(now = new Date(), options = {}) {
       const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
       for (const item of body.topics ?? []) {
         const title = String(item.title ?? "");
-        if (!title.includes("宝可梦")) continue;
         const score = scoreTopicTitle(title, monthTerms);
+        if (!score) continue;
         const sourceUrl = `${LINUXDO_BASE}/t/topic/${item.id}`;
         if (options.onDiscovery) {
           await options.onDiscovery({
@@ -478,6 +556,21 @@ async function fetchTopicViaReader(normalized) {
   return merged;
 }
 
+function cleanCommunityText(value = "") {
+  return stripHtml(value)
+    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, " $1 ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/Image\s+\d+(?::\s*[\w:+-]+)?/gi, " ")
+    .replace(/[`"'“”‘’]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function addCommunityMatch(add, text, pattern, points) {
+  for (const match of text.matchAll(pattern)) add(match[1], points, text);
+}
+
 function communityCandidate(topic) {
   const scores = new Map();
   const evidence = new Map();
@@ -490,18 +583,20 @@ function communityCandidate(topic) {
     evidence.set(value, list);
   };
   for (const post of topic.posts.slice(1, 160)) {
-    const text = stripHtml(post.cooked ?? post.raw ?? "");
+    const text = cleanCommunityText(post.cooked ?? post.raw ?? "");
     if (!text) continue;
-    for (const match of text.matchAll(/(?:兑换码|优惠码|答案|应该是|我猜|就是)\s*[：:\-=]?\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})/gi)) add(match[1], 3, text);
-    for (const match of text.matchAll(/([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})\s*(?:已)?(?:兑换|续费)成功/gi)) add(match[1], 3, text);
-    for (const line of String(post.cooked ?? post.raw ?? "").split(/\n+/)) {
-      const plainLine = stripHtml(line);
-      if (!plainLine || /!\[|]\(|https?:\/\//.test(line)) continue;
+    addCommunityMatch(add, text, /(?:兑换码|优惠码|白嫖码|礼品码|礼品卡|答案)\s*(?:是|为|那里输入|输入|填入|填写|[:：=\-])?\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})/gi, 4);
+    addCommunityMatch(add, text, /(?:是的|应该是|我猜|猜(?:出来)?是|就是|正确答案|ps[:：]?)\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})/gi, 3);
+    addCommunityMatch(add, text, /([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})\s*(?:是正确的答案|正确|没错|已?(?:兑换|续费)成功|可用|0\s*元|免费)/gi, 3);
+    addCommunityMatch(add, text, /(?:输入|填入|填写)\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})(?:，|,|。|后|再|就|会)/gi, 3);
+    for (const rawLine of String(post.cooked ?? post.raw ?? "").split(/\n+/)) {
+      const plainLine = cleanCommunityText(rawLine);
+      if (!plainLine) continue;
       const standalone = plainLine.match(/^#*\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})(?:[，,。！!；;：:\s].*)?$/);
-      if (standalone) add(standalone[1], 1, plainLine);
+      if (standalone) add(standalone[1], 2, plainLine);
     }
     const first = text.match(/^#*\s*([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,32})(?=[，,。！!；;：:\s]|$)/);
-    if (first) add(first[1], 1, text);
+    if (first) add(first[1], 2, text);
   }
   const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
   if (!ranked[0] || ranked[0][1] < 4) return null;
@@ -642,13 +737,13 @@ function verifiedFrom(items) {
   return null;
 }
 
-async function upsertCode(env, period, item) {
+async function upsertCode(env, period, item, status = "verified") {
   await env.DB.prepare(`
     INSERT INTO codes(period, code, status, confidence, evidence_count, source_url, source_title, updated_at)
-    VALUES (?, ?, 'verified', ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(period) DO UPDATE SET code = excluded.code, status = 'verified', confidence = excluded.confidence,
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(period) DO UPDATE SET code = excluded.code, status = excluded.status, confidence = excluded.confidence,
       evidence_count = excluded.evidence_count, source_url = excluded.source_url, source_title = excluded.source_title, updated_at = CURRENT_TIMESTAMP
-  `).bind(period, item.code, item.confidence, item.evidenceCount, item.sourceUrl, item.sourceTitle).run();
+  `).bind(period, item.code, status, item.confidence, item.evidenceCount, item.sourceUrl, item.sourceTitle).run();
 }
 
 async function collectSource(env, source, period, now, topicUrl = null) {
@@ -854,6 +949,101 @@ async function runDiscovery(env, now = new Date()) {
       discoveries
     };
   }
+}
+
+function periodDate(period) {
+  const match = String(period ?? "").match(/^(\d{4})-(\d{2})$/);
+  if (!match) throw new Error("月份格式不正确");
+  return new Date(`${match[1]}-${match[2]}-14T01:00:00.000Z`);
+}
+
+function recentPeriods(count, now = new Date()) {
+  const { year, month } = chinaParts(now);
+  const periods = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const date = new Date(Date.UTC(year, month - 1 - offset, 14, 1));
+    periods.push(periodOf(date));
+  }
+  return periods;
+}
+
+function mirrorCandidate(period) {
+  const item = KNOWN_PUBLIC_MIRROR_CODES[period];
+  if (!item) return null;
+  return {
+    code: item.code,
+    sourceKey: "linuxdo_public_mirror",
+    sourceName: item.sourceName,
+    sourceType: "linuxdo_mirror",
+    sourceUrl: item.sourceUrl,
+    confidence: 0.62,
+    evidenceCount: 1,
+    evidence: item.evidence
+  };
+}
+
+async function crawlPeriod(env, period) {
+  const existing = await env.DB.prepare(`SELECT period, code, status FROM codes WHERE period = ? LIMIT 1`).bind(period).first();
+  if (existing) return { period, ok: true, skipped: true, message: "已有记录，跳过", item: existing };
+
+  const now = periodDate(period);
+  let found = null;
+  try {
+    found = await discoverTopic(now, {
+      provider: await getProvider(env),
+      onDiscovery: (item) => recordDiscovery(env, item)
+    });
+  } catch (error) {
+    found = KNOWN_LINUXDO_TOPICS[period] ?? null;
+    if (!found) {
+      const mirror = mirrorCandidate(period);
+      if (!mirror) throw error;
+      await saveCandidate(env, period, mirror);
+      await upsertCode(env, period, {
+        code: mirror.code,
+        confidence: mirror.confidence,
+        evidenceCount: mirror.evidenceCount,
+        sourceUrl: mirror.sourceUrl,
+        sourceTitle: mirror.sourceName
+      }, "candidate");
+      await log(env, period, "backfill_recent", "candidate", `公开镜像证据写入候选：${mirror.code}`, mirror.sourceUrl);
+      return { period, ok: true, status: "candidate", code: mirror.code, sourceUrl: mirror.sourceUrl };
+    }
+  }
+
+  const topic = await fetchTopic(found.url);
+  const item = communityCandidate(topic);
+  if (!item) {
+    await log(env, period, "backfill_recent", "candidate_not_verified", `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`, topic.url);
+    return { period, ok: false, message: "没有提取出高可信社区答案", topic: found, postCount: topic.posts.length };
+  }
+
+  await saveCandidate(env, period, item);
+  await upsertCode(env, period, {
+    code: item.code,
+    confidence: item.confidence,
+    evidenceCount: item.evidenceCount,
+    sourceUrl: item.sourceUrl,
+    sourceTitle: "LINUX DO 评论区社区共识"
+  });
+  await log(env, period, "backfill_recent", "updated", `已回填 ${period}：${item.code}，读取评论 ${topic.posts.length} 条`, topic.url);
+  return { period, ok: true, status: "verified", code: item.code, topic: found, postCount: topic.posts.length, evidenceCount: item.evidenceCount };
+}
+
+async function backfillRecent(env, data = {}) {
+  const months = Math.min(MAX_BACKFILL_MONTHS, Math.max(1, Number(data.months ?? 5) || 5));
+  const periods = recentPeriods(months);
+  const results = [];
+  for (const period of periods) {
+    try {
+      results.push(await crawlPeriod(env, period));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await log(env, period, "backfill_recent", "error", message);
+      results.push({ period, ok: false, message });
+    }
+  }
+  return { ok: results.some((item) => item.ok), periods, results };
 }
 
 function hashText(value = "") {
@@ -1066,6 +1256,7 @@ export default {
       if (url.pathname === "/api/admin/evidence" && request.method === "GET") return json({ period: periodOf(), items: await listEvidence(env, periodOf()) });
       if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: periodOf(), ...(await listDiscovery(env, periodOf())) });
       if (url.pathname === "/api/admin/discover" && request.method === "POST") return json(await runDiscovery(env));
+      if (url.pathname === "/api/admin/backfill-recent" && request.method === "POST") return json(await backfillRecent(env, await body(request)));
       if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT s.*, c.result AS last_result, c.message AS last_message, c.source_url AS last_source_url, c.created_at AS last_checked_at FROM sources s LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1) ORDER BY s.priority, s.id`).all()).results });
       if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
         const data = await body(request);
@@ -1084,6 +1275,7 @@ export default {
 };
 
 export {
+  backfillRecent,
   buildHealth,
   communityCandidate,
   discoverTopic,
