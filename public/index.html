@@ -73,7 +73,7 @@
     }
 
     async function readJson(path) {
-      const response = await fetch(path);
+      const response = await fetch(path, { cache: "no-store" });
       let data = null;
       try { data = await response.json(); } catch {}
       if (!response.ok) {
