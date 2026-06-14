@@ -7,6 +7,8 @@ const MAX_TOPIC_POSTS = 240;
 const TOPIC_POST_BATCH_SIZE = 40;
 const MAX_DISCOVERY_QUERIES = 28;
 const MAX_READER_TOPIC_PAGES = 3;
+const MAX_CATEGORY_DISCOVERY_PAGES = 16;
+const CATEGORY_DISCOVERY_BATCH_SIZE = 16;
 const CN_MONTHS = [
   "",
   "一",
@@ -158,12 +160,22 @@ function normalizeTopic(value) {
   return `${LINUXDO_BASE}/t/topic/${match[1]}`;
 }
 
-async function fetchText(url, accept = "text/html,application/json;q=0.9,*/*;q=0.8") {
-  const response = await fetch(url, {
-    headers: { "User-Agent": "pokemon-code-index/2.1 (+public-code-aggregator)", Accept: accept }
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return await response.text();
+async function fetchText(url, accept = "text/html,application/json;q=0.9,*/*;q=0.8", timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { "User-Agent": "pokemon-code-index/2.1 (+public-code-aggregator)", Accept: accept },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("HTTP timeout");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function candidate(code, source, confidence, evidenceCount = 1, evidence = "") {
@@ -281,35 +293,96 @@ function scoreTopicTitle(title, monthTerms) {
   return score;
 }
 
+function parseCategoryTopics(markdown = "") {
+  const topics = [];
+  const seen = new Set();
+  const pattern = /\[([^\]\n]+)\]\(https?:\/\/linux\.do\/t\/topic\/(\d+)\)/g;
+  for (const match of String(markdown).matchAll(pattern)) {
+    const title = stripHtml(match[1]);
+    const id = Number(match[2]);
+    if (!title || !id || seen.has(id)) continue;
+    seen.add(id);
+    topics.push({ id, title, url: `${LINUXDO_BASE}/t/topic/${id}` });
+  }
+  return topics;
+}
+
+async function discoverTopicFromCategory(now, provider, onDiscovery) {
+  const { month } = chinaParts(now);
+  const monthTerms = monthSearchTerms(month);
+  const seen = new Map();
+  for (let page = 1; page <= MAX_CATEGORY_DISCOVERY_PAGES; page += CATEGORY_DISCOVERY_BATCH_SIZE) {
+    const batch = Array.from(
+      { length: Math.min(CATEGORY_DISCOVERY_BATCH_SIZE, MAX_CATEGORY_DISCOVERY_PAGES - page + 1) },
+      (_, index) => page + index
+    );
+    const settled = await Promise.allSettled(batch.map((pageNumber) => {
+      const pageUrl = `${LINUXDO_BASE}/c/welfare/36?page=${pageNumber}`;
+      return fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 12000).then((body) => ({ pageNumber, body }));
+    }));
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      for (const item of parseCategoryTopics(result.value.body)) {
+        if (!item.title.includes("宝可梦")) continue;
+        const score = scoreTopicTitle(item.title, monthTerms);
+        if (onDiscovery) {
+          await onDiscovery({
+            providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
+            period: periodOf(now),
+            kind: "linuxdo_category",
+            query: `linux.do/c/welfare/36?page=${result.value.pageNumber}`,
+            title: item.title,
+            sourceUrl: item.url,
+            score
+          });
+        }
+        const current = seen.get(item.id);
+        if (!current || score > current.score) seen.set(item.id, { id: item.id, title: item.title, score });
+      }
+    }
+  }
+  const ranked = [...seen.values()].sort((a, b) => b.score - a.score);
+  if (!ranked[0] || ranked[0].score < 6) throw new Error("没有在福利羊毛分类发现本月公开帖子");
+  return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
+}
+
 async function discoverTopic(now = new Date(), options = {}) {
   const { year, month } = chinaParts(now);
   const monthTerms = monthSearchTerms(month);
   const provider = options.provider ?? DEFAULT_PROVIDER;
   const seen = new Map();
+  let searchFailed = false;
   for (const query of topicSearchQueries(year, month, provider)) {
-    const q = encodeURIComponent(query);
-    const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
-    for (const item of body.topics ?? []) {
-      const title = String(item.title ?? "");
-      if (!title.includes("宝可梦")) continue;
-      const score = scoreTopicTitle(title, monthTerms);
-      const sourceUrl = `${LINUXDO_BASE}/t/topic/${item.id}`;
-      if (options.onDiscovery) {
-        await options.onDiscovery({
-          providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
-          period: periodOf(now),
-          kind: "linuxdo_topic",
-          query,
-          title,
-          sourceUrl,
-          score
-        });
+    try {
+      const q = encodeURIComponent(query);
+      const body = JSON.parse(await fetchText(`${LINUXDO_BASE}/search.json?q=${q}`, "application/json"));
+      for (const item of body.topics ?? []) {
+        const title = String(item.title ?? "");
+        if (!title.includes("宝可梦")) continue;
+        const score = scoreTopicTitle(title, monthTerms);
+        const sourceUrl = `${LINUXDO_BASE}/t/topic/${item.id}`;
+        if (options.onDiscovery) {
+          await options.onDiscovery({
+            providerKey: provider.providerKey ?? POKEMON_PROVIDER_KEY,
+            period: periodOf(now),
+            kind: "linuxdo_topic",
+            query,
+            title,
+            sourceUrl,
+            score
+          });
+        }
+        const current = seen.get(item.id);
+        if (!current || score > current.score) seen.set(item.id, { id: item.id, title, score });
       }
-      const current = seen.get(item.id);
-      if (!current || score > current.score) seen.set(item.id, { id: item.id, title, score });
+    } catch (error) {
+      searchFailed = true;
     }
   }
   const ranked = [...seen.values()].sort((a, b) => b.score - a.score);
+  if ((!ranked[0] || ranked[0].score < 6) && searchFailed) {
+    return await discoverTopicFromCategory(now, provider, options.onDiscovery);
+  }
   if (!ranked[0] || ranked[0].score < 6) throw new Error("没有发现本月公开帖子");
   return { url: `${LINUXDO_BASE}/t/topic/${ranked[0].id}`, title: ranked[0].title };
 }

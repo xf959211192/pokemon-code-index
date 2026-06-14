@@ -279,6 +279,37 @@ test("discoverTopic 会记录每次站内搜索发现的候选帖子", async () 
   }
 });
 
+test("discoverTopic 在站内搜索被拒绝时会从福利羊毛分类发现帖子", async () => {
+  const originalFetch = globalThis.fetch;
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    requested.push(value);
+    if (value.includes("/search.json")) return new Response("Forbidden", { status: 403 });
+    if (value.includes("/c/welfare/36?page=12")) {
+      return new Response(`
+Title: Latest 福利羊毛 topics - LINUX DO
+
+Markdown Content:
+| Topic | Posters | | | |
+| [宝可梦机场之六月免费兑换码猜猜我是谁](https://linux.do/t/topic/2289939) | poster | [332](https://linux.do/t/topic/2289939/1) | 10.2k | [12d](https://linux.do/t/topic/2289939/332) |
+`, { status: 200 });
+    }
+    return new Response("Markdown Content:\n| Topic | Posters |\n", { status: 200 });
+  };
+
+  try {
+    const topic = await discoverTopic(new Date("2026-06-14T01:00:00.000Z"));
+    assert.deepEqual(topic, {
+      url: "https://linux.do/t/topic/2289939",
+      title: "宝可梦机场之六月免费兑换码猜猜我是谁"
+    });
+    assert.ok(requested.some((url) => url.includes("r.jina.ai/http://linux.do/c/welfare/36?page=12")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("discoverTopic 会使用多组公开搜索词扩大命中范围", async () => {
   const originalFetch = globalThis.fetch;
   const requested = [];

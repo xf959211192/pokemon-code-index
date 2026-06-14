@@ -88,7 +88,7 @@
 
     <section class="card">
       <h2>搜索发现</h2>
-      <p class="sub">按商家别名、套餐关键词、公开频道和月份生成查询。当前 Worker 自动执行 LINUX DO 公开站内搜索，其他查询用于人工交叉验证或后续接入搜索 API。</p>
+      <p class="sub">按商家别名、套餐关键词、公开频道和月份生成查询。当前 Worker 会先尝试 LINUX DO 公开站内搜索；若被防护拦截，则回退扫描福利羊毛公开分类页。</p>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>类型</th><th>查询</th><th>用途</th></tr></thead>
