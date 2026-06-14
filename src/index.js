@@ -1085,6 +1085,7 @@ export default {
 
 export {
   buildHealth,
+  communityCandidate,
   discoverTopic,
   evidenceFromCandidate,
   evidenceFromPuzzle,
