@@ -5,7 +5,14 @@ import oldWorker, {
   periodOf
 } from "./index.js";
 
+const LINUXDO_BASE = "https://linux.do";
+const JINA_READER_BASE = "https://r.jina.ai/http://";
 const KNOWN_TOPIC_GRACE_DAY = 14;
+const MAX_DISCOVERY_PAGES = 24;
+const DISCOVERY_BATCH_SIZE = 4;
+const FETCH_TIMEOUT_MS = 15000;
+
+const CN_MONTHS = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
 
 const KNOWN_LINUXDO_TOPICS = {
   "2026-02": {
@@ -52,6 +59,21 @@ async function body(request) {
   }
 }
 
+function stripHtml(text = "") {
+  return String(text)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function safeUrl(value) {
   if (!value) return null;
   const url = new URL(String(value).trim());
@@ -59,12 +81,17 @@ function safeUrl(value) {
   return url.toString();
 }
 
+function normalizeTopic(value) {
+  const url = new URL(String(value ?? "").trim());
+  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("仅支持 https://linux.do 帖子地址");
+  const match = url.pathname.match(/^\/t\/(?:[^/]+\/)?topic\/(\d+)/) || url.pathname.match(/^\/t\/topic\/(\d+)/);
+  if (!match) throw new Error("不是有效的 LINUX DO 话题地址");
+  return `${LINUXDO_BASE}/t/topic/${match[1]}`;
+}
+
 function normalizeManualTopicUrl(topicUrl) {
   const value = String(topicUrl ?? "").trim();
-  if (!value) return null;
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("指定帖子仅支持 https://linux.do 地址");
-  return value;
+  return value ? normalizeTopic(value) : null;
 }
 
 function plausibleCode(value) {
@@ -96,6 +123,227 @@ function rankStatus(status = "") {
     expired: 0
   };
   return ranks[status] ?? 1;
+}
+
+async function fetchText(url, accept = "text/plain,*/*", timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("timeout"), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: accept,
+        "User-Agent": "pokemon-code-index/1.0"
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readerUrlForLinuxDo(value) {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("Reader 只允许读取 linux.do 公开页面");
+  return `${JINA_READER_BASE}${url.hostname}${url.pathname}${url.search}`;
+}
+
+function monthSearchTerms(month) {
+  const cn = CN_MONTHS[month];
+  return [
+    `${month}月`,
+    `${String(month).padStart(2, "0")}月`,
+    cn ? `${cn}月` : "",
+    cn ? `${cn}月份` : ""
+  ].filter(Boolean);
+}
+
+function scoreTopicTitle(title, now = new Date()) {
+  const { month } = chinaParts(now);
+  const text = stripHtml(title);
+  if (!text.includes("宝可梦")) return 0;
+  if (!monthSearchTerms(month).some((term) => text.includes(term))) return 0;
+  let score = 8;
+  if (/兑换码|优惠码|白嫖码|免费码|免费兑换码/.test(text)) score += 4;
+  if (/猜猜我是谁|答案|谜题/.test(text)) score += 3;
+  if (/宝可梦机场|宝可梦星云|宝可梦云|pokemon/i.test(text)) score += 2;
+  if (/每月|月度|本月/.test(text)) score += 1;
+  return score;
+}
+
+function parseTopicLinks(markdown = "") {
+  const topics = [];
+  const seen = new Set();
+  const text = String(markdown ?? "");
+  const patterns = [
+    /\[([^\]\n]+)]\(https?:\/\/linux\.do\/t\/(?:[^/)]+\/)?topic\/(\d+)[^)]*\)/g,
+    /\[([^\]\n]+)]\(\/t\/(?:[^/)]+\/)?topic\/(\d+)[^)]*\)/g,
+    /href=["']https?:\/\/linux\.do\/t\/(?:[^"']+\/)?topic\/(\d+)[^"']*["'][^>]*>([^<]+)</g,
+    /https?:\/\/linux\.do\/t\/(?:[^\s)]+\/)?topic\/(\d+)/g
+  ];
+
+  for (const pattern of patterns.slice(0, 3)) {
+    for (const match of text.matchAll(pattern)) {
+      const title = stripHtml(pattern === patterns[2] ? match[2] : match[1]);
+      const id = Number(pattern === patterns[2] ? match[1] : match[2]);
+      if (!title || !id || seen.has(id)) continue;
+      seen.add(id);
+      topics.push({ id, title, url: `${LINUXDO_BASE}/t/topic/${id}` });
+    }
+  }
+
+  for (const match of text.matchAll(patterns[3])) {
+    const id = Number(match[1]);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    topics.push({ id, title: `linux.do topic ${id}`, url: `${LINUXDO_BASE}/t/topic/${id}` });
+  }
+
+  return topics;
+}
+
+function addDiscoveryCandidate(map, item, now, kind, query) {
+  const score = scoreTopicTitle(item.title, now);
+  if (!score) return null;
+  const current = map.get(item.id);
+  const next = { ...item, score, kind, query };
+  if (!current || score > current.score) map.set(item.id, next);
+  return next;
+}
+
+async function recordDiscovery(env, item) {
+  try {
+    await env.DB.prepare(`
+      INSERT INTO source_discoveries(provider_key, period, discovery_kind, query, title, source_url, score, updated_at)
+      VALUES ('pokemon_nebula', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(provider_key, period, discovery_kind, source_url, query) DO UPDATE SET
+        title = excluded.title,
+        score = MAX(source_discoveries.score, excluded.score),
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(item.period, item.kind, item.query, item.title, item.sourceUrl, item.score).run();
+  } catch (error) {
+    console.warn("record_discovery_failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function discoverFromLinuxDoSearch(env, now) {
+  const { year, month } = chinaParts(now);
+  const period = periodOf(now);
+  const cn = CN_MONTHS[month];
+  const queries = [
+    `宝可梦 ${year} ${month}月 免费兑换码`,
+    `宝可梦机场 ${cn}月 免费兑换码 猜猜我是谁`,
+    `宝可梦机场 ${month}月 优惠码`,
+    `宝可梦星云 ${cn}月 兑换码`,
+    `pokemon521 ${month}月 兑换码`
+  ].filter(Boolean);
+  const candidates = new Map();
+
+  for (const query of queries) {
+    try {
+      const text = await fetchText(`${LINUXDO_BASE}/search.json?q=${encodeURIComponent(query)}`, "application/json,*/*", 12000);
+      const data = JSON.parse(text);
+      for (const topic of data.topics ?? []) {
+        const item = {
+          id: Number(topic.id),
+          title: String(topic.title ?? ""),
+          url: `${LINUXDO_BASE}/t/topic/${topic.id}`
+        };
+        const found = addDiscoveryCandidate(candidates, item, now, "linuxdo_search", query);
+        if (found) await recordDiscovery(env, { period, kind: found.kind, query: found.query, title: found.title, sourceUrl: found.url, score: found.score });
+      }
+    } catch (error) {
+      await log(env, period, "discover_search", "search_error", `${query}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return [...candidates.values()].sort((a, b) => b.score - a.score);
+}
+
+async function discoverFromLinuxDoCategory(env, now) {
+  const period = periodOf(now);
+  const candidates = new Map();
+  const seedTopics = new Map();
+
+  for (let page = 1; page <= MAX_DISCOVERY_PAGES; page += DISCOVERY_BATCH_SIZE) {
+    const batch = Array.from(
+      { length: Math.min(DISCOVERY_BATCH_SIZE, MAX_DISCOVERY_PAGES - page + 1) },
+      (_, index) => page + index
+    );
+    const settled = await Promise.allSettled(batch.map((pageNumber) => {
+      const pageUrl = `${LINUXDO_BASE}/c/welfare/36?page=${pageNumber}`;
+      return fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 15000).then((content) => ({ pageNumber, content }));
+    }));
+
+    for (const result of settled) {
+      if (result.status !== "fulfilled") continue;
+      for (const topic of parseTopicLinks(result.value.content)) {
+        if (topic.title.includes("宝可梦")) seedTopics.set(topic.id, topic);
+        const found = addDiscoveryCandidate(candidates, topic, now, "linuxdo_category", `linux.do/c/welfare/36?page=${result.value.pageNumber}`);
+        if (found) await recordDiscovery(env, { period, kind: found.kind, query: found.query, title: found.title, sourceUrl: found.url, score: found.score });
+      }
+    }
+
+    const ranked = [...candidates.values()].sort((a, b) => b.score - a.score);
+    if (ranked[0]?.score >= 10) return ranked;
+  }
+
+  const related = await discoverFromRelatedSeeds(env, now, [...seedTopics.values()].slice(0, 12));
+  for (const item of related) {
+    const current = candidates.get(item.id);
+    if (!current || item.score > current.score) candidates.set(item.id, item);
+  }
+
+  return [...candidates.values()].sort((a, b) => b.score - a.score);
+}
+
+async function discoverFromRelatedSeeds(env, now, seeds) {
+  const period = periodOf(now);
+  const candidates = new Map();
+  const settled = await Promise.allSettled(seeds.map((seed) => fetchText(readerUrlForLinuxDo(seed.url), "text/plain,*/*", 15000).then((content) => ({ seed, content }))));
+
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    for (const topic of parseTopicLinks(result.value.content)) {
+      const found = addDiscoveryCandidate(candidates, topic, now, "linuxdo_related_topic", result.value.seed.url);
+      if (found) await recordDiscovery(env, { period, kind: found.kind, query: found.query, title: found.title, sourceUrl: found.url, score: found.score });
+    }
+  }
+
+  return [...candidates.values()].sort((a, b) => b.score - a.score);
+}
+
+async function discoverMonthlyTopic(env, now = new Date()) {
+  const period = periodOf(now);
+  const found = [];
+
+  found.push(...await discoverFromLinuxDoSearch(env, now));
+  found.push(...await discoverFromLinuxDoCategory(env, now));
+
+  const known = KNOWN_LINUXDO_TOPICS[period];
+  if (known) {
+    found.push({
+      id: Number(known.url.match(/topic\/(\d+)/)?.[1] ?? 0),
+      url: known.url,
+      title: known.title,
+      score: 9,
+      kind: "known_topic_url",
+      query: "KNOWN_LINUXDO_TOPICS"
+    });
+  }
+
+  const deduped = new Map();
+  for (const item of found) {
+    const url = normalizeTopic(item.url);
+    const current = deduped.get(url);
+    if (!current || Number(item.score) > Number(current.score)) deduped.set(url, { ...item, url });
+  }
+
+  const ranked = [...deduped.values()].sort((a, b) => Number(b.score) - Number(a.score));
+  if (!ranked[0] || Number(ranked[0].score) < 6) throw new Error("没有发现本月 LINUX DO 公开月度帖");
+  await log(env, period, "discover_monthly_topic", "discovered", `发现候选帖子：${ranked[0].title}`, ranked[0].url);
+  return ranked[0];
 }
 
 async function hasVerifiedCode(env, period) {
@@ -309,33 +557,35 @@ async function testTopic(data) {
   };
 }
 
-function knownTopicFor(period) {
-  return KNOWN_LINUXDO_TOPICS[period] ?? null;
-}
-
 async function refreshKnownTopic(env, { force = false, triggerType = "manual_refresh", topicUrl = null, now = new Date() } = {}) {
   const period = periodOf(now);
-  const manualTopicUrl = normalizeManualTopicUrl(topicUrl);
-  const knownTopic = manualTopicUrl ? { url: manualTopicUrl, title: "指定 LINUX DO 帖子" } : knownTopicFor(period);
-
-  if (!knownTopic) {
-    return { ok: false, period, message: "没有配置本月已知 LINUX DO 帖子，请在管理页填写帖子地址或手动补录" };
-  }
 
   if (!force && !inAutoWindow(now) && !inKnownTopicGraceWindow(now)) {
-    const message = `当前不在自动检查窗口，已知帖兜底仅运行到每月 ${KNOWN_TOPIC_GRACE_DAY} 日`;
-    await log(env, period, triggerType, "skipped", message, knownTopic.url);
+    const message = `当前不在自动检查窗口，自动发现仅运行到每月 ${KNOWN_TOPIC_GRACE_DAY} 日`;
+    await log(env, period, triggerType, "skipped", message);
     return { ok: true, skipped: true, period, message };
   }
 
   if (!force && await hasVerifiedCode(env, period)) {
     const message = "本月已有已确认兑换码，停止自动抓取";
-    await log(env, period, triggerType, "skipped", message, knownTopic.url);
+    await log(env, period, triggerType, "skipped", message);
     return { ok: true, skipped: true, period, message };
   }
 
+  let topicRef;
   try {
-    const topic = await fetchTopic(knownTopic.url);
+    const manualTopicUrl = normalizeManualTopicUrl(topicUrl);
+    topicRef = manualTopicUrl
+      ? { url: manualTopicUrl, title: "指定 LINUX DO 帖子", kind: "manual_topic_url" }
+      : await discoverMonthlyTopic(env, now);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await log(env, period, triggerType, "topic_not_found", message);
+    return { ok: false, period, message };
+  }
+
+  try {
+    const topic = await fetchTopic(topicRef.url);
     const item = communityCandidate(topic);
 
     if (item) await saveCandidate(env, period, item, "linuxdo_monthly_topic");
@@ -344,8 +594,8 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
       period,
       item ? "candidate_found" : "no_candidate",
       item
-        ? `读取评论 ${topic.posts.length} 条；社区候选：${item.code}；证据分数：${item.evidenceCount}`
-        : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`,
+        ? `发现帖子：${topicRef.title || topic.title}；读取评论 ${topic.posts.length} 条；社区候选：${item.code}；证据分数：${item.evidenceCount}`
+        : `发现帖子：${topicRef.title || topic.title}；读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`,
       item ? 1 : 0,
       topic.url
     );
@@ -354,7 +604,7 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
     if (!verified) {
       const message = item ? "已保存候选，但尚未达到自动确认条件" : "没有提取到候选兑换码";
       await log(env, period, triggerType, "candidate_not_verified", message, topic.url);
-      return { ok: false, period, message, topic: { url: topic.url, title: topic.title }, candidate: item ?? null };
+      return { ok: false, period, message, topic: { url: topic.url, title: topic.title || topicRef.title }, candidate: item ?? null };
     }
 
     await upsertVerifiedCode(env, period, verified);
@@ -369,13 +619,13 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
       evidenceCount: verified.evidenceCount,
       sourceUrl: verified.sourceUrl,
       sourceTitle: verified.sourceTitle,
-      topic: { url: topic.url, title: topic.title }
+      topic: { url: topic.url, title: topic.title || topicRef.title }
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await sourceCheck(env, period, "error", `已知帖兜底失败：${message}`, 0, knownTopic.url);
-    await log(env, period, triggerType, "error", message, knownTopic.url);
-    return { ok: false, period, message, topic: knownTopic };
+    await sourceCheck(env, period, "error", `帖子读取或识别失败：${message}`, 0, topicRef.url);
+    await log(env, period, triggerType, "error", message, topicRef.url);
+    return { ok: false, period, message, topic: topicRef };
   }
 }
 
@@ -411,11 +661,11 @@ async function listEvidence(env, period) {
 }
 
 async function listDiscovery(env, period) {
-  const planned = Object.entries(KNOWN_LINUXDO_TOPICS).map(([itemPeriod, item]) => ({
-    kind: "known_linuxdo_topic",
-    query: `${itemPeriod} ${item.title}`,
-    purpose: "已知公开月度帖；不包含固定兑换码"
-  }));
+  const planned = [
+    { kind: "linuxdo_search", query: "宝可梦 + 当月 + 兑换码/优惠码", purpose: "优先搜索 Linux.do 站内话题" },
+    { kind: "linuxdo_category", query: "linux.do/c/welfare/36", purpose: "搜索失败时扫描福利羊毛分类" },
+    { kind: "linuxdo_related_topic", query: "已发现的宝可梦历史帖", purpose: "从历史帖关联链接继续找当月帖" }
+  ];
   const { results } = await env.DB.prepare(`
     SELECT period, discovery_kind, query, title, source_url, score, updated_at
     FROM source_discoveries
@@ -484,7 +734,12 @@ export default {
     if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: currentPeriod, ...(await listDiscovery(env, currentPeriod)) });
 
     if (url.pathname === "/api/admin/discover" && request.method === "POST") {
-      return json({ ok: true, period: currentPeriod, bestTopic: knownTopicFor(currentPeriod), knownTopics: KNOWN_LINUXDO_TOPICS });
+      try {
+        const bestTopic = await discoverMonthlyTopic(env);
+        return json({ ok: true, period: currentPeriod, bestTopic, ...(await listDiscovery(env, currentPeriod)) });
+      } catch (error) {
+        return json({ ok: false, period: currentPeriod, message: error instanceof Error ? error.message : String(error), ...(await listDiscovery(env, currentPeriod)) }, 422);
+      }
     }
 
     if (url.pathname === "/api/admin/backfill-recent" && request.method === "POST") {
@@ -517,6 +772,7 @@ export default {
 
 export {
   KNOWN_LINUXDO_TOPICS,
+  discoverMonthlyTopic,
   manual,
   refreshKnownTopic
 };
