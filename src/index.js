@@ -11,6 +11,8 @@ const MAX_READER_TOPIC_PAGES = 12;
 const MAX_DISCOVERY_PAGES = 24;
 const DISCOVERY_BATCH_SIZE = 4;
 const FETCH_TIMEOUT_MS = 15000;
+const FETCH_RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 800;
 
 const CN_MONTHS = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
 
@@ -42,11 +44,7 @@ function inAutoWindow(date = new Date()) {
 }
 
 async function body(request) {
-  try {
-    return await request.json();
-  } catch {
-    return {};
-  }
+  try { return await request.json(); } catch { return {}; }
 }
 
 function stripHtml(text = "") {
@@ -109,16 +107,21 @@ function hashText(value = "") {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRetryableError(error) {
+  const message = errorMessage(error);
+  return /^HTTP (403|408|409|425|429|500|502|503|504)$/.test(message) || /timeout|aborted|network|Unexpected token/i.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function rankStatus(status = "") {
-  const ranks = {
-    candidate: 1,
-    unknown: 1,
-    reported: 2,
-    corroborated: 3,
-    official_notice: 4,
-    checkout_verified: 5,
-    expired: 0
-  };
+  const ranks = { candidate: 1, unknown: 1, reported: 2, corroborated: 3, official_notice: 4, checkout_verified: 5, expired: 0 };
   return ranks[status] ?? 1;
 }
 
@@ -148,6 +151,20 @@ async function fetchText(url, accept = "text/plain,*/*", timeoutMs = FETCH_TIMEO
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchTextWithRetry(url, accept = "text/plain,*/*", timeoutMs = FETCH_TIMEOUT_MS, attempts = FETCH_RETRY_ATTEMPTS) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchText(url, accept, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableError(error)) break;
+      await sleep(RETRY_DELAY_MS * attempt);
+    }
+  }
+  throw lastError;
 }
 
 function readerUrlForLinuxDo(value) {
@@ -215,7 +232,7 @@ async function recordDiscovery(env, item) {
         updated_at = CURRENT_TIMESTAMP
     `).bind(POKEMON_PROVIDER_KEY, item.period, item.kind, item.query, item.title, item.sourceUrl, item.score).run();
   } catch (error) {
-    console.warn("record_discovery_failed", error instanceof Error ? error.message : String(error));
+    console.warn("record_discovery_failed", errorMessage(error));
   }
 }
 
@@ -243,7 +260,7 @@ async function discoverFromSearch(env, now) {
 
   for (const query of queries) {
     try {
-      const text = await fetchText(`${LINUXDO_BASE}/search.json?q=${encodeURIComponent(query)}`, "application/json,*/*", 12000);
+      const text = await fetchTextWithRetry(`${LINUXDO_BASE}/search.json?q=${encodeURIComponent(query)}`, "application/json,*/*", 12000, 2);
       const data = JSON.parse(text);
       for (const topic of data.topics ?? []) {
         const item = { id: Number(topic.id), title: String(topic.title ?? ""), url: `${LINUXDO_BASE}/t/topic/${topic.id}` };
@@ -251,7 +268,7 @@ async function discoverFromSearch(env, now) {
         if (found) await recordDiscovery(env, { period, kind: found.kind, query: found.query, title: found.title, sourceUrl: found.url, score: found.score });
       }
     } catch (error) {
-      await log(env, period, "discover_search", "search_error", `${query}: ${error instanceof Error ? error.message : String(error)}`);
+      await log(env, period, "discover_search", "search_error", `${query}: ${errorMessage(error)}`);
     }
   }
 
@@ -267,7 +284,7 @@ async function discoverFromCategory(env, now) {
     const batch = Array.from({ length: Math.min(DISCOVERY_BATCH_SIZE, MAX_DISCOVERY_PAGES - page + 1) }, (_, index) => page + index);
     const settled = await Promise.allSettled(batch.map((pageNumber) => {
       const pageUrl = `${LINUXDO_BASE}/c/welfare/36?page=${pageNumber}`;
-      return fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 15000).then((content) => ({ pageNumber, content }));
+      return fetchTextWithRetry(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 15000, 2).then((content) => ({ pageNumber, content }));
     }));
 
     for (const result of settled) {
@@ -295,7 +312,7 @@ async function discoverFromRelatedSeeds(env, now, seeds) {
   const period = periodOf(now);
   const candidates = new Map();
   const settled = await Promise.allSettled(seeds.map((seed) =>
-    fetchText(readerUrlForLinuxDo(seed.url), "text/plain,*/*", 15000).then((content) => ({ seed, content }))
+    fetchTextWithRetry(readerUrlForLinuxDo(seed.url), "text/plain,*/*", 15000, 2).then((content) => ({ seed, content }))
   ));
 
   for (const result of settled) {
@@ -342,7 +359,8 @@ async function fetchTopicPosts(normalized, initialBody) {
   for (let index = 0; index < missing.length; index += TOPIC_POST_BATCH_SIZE) {
     const batch = missing.slice(index, index + TOPIC_POST_BATCH_SIZE);
     const query = batch.map((id) => `post_ids[]=${encodeURIComponent(id)}`).join("&");
-    const body = JSON.parse(await fetchText(`${normalized}.json?${query}`, "application/json,*/*"));
+    const text = await fetchTextWithRetry(`${normalized}.json?${query}`, "application/json,*/*", FETCH_TIMEOUT_MS, 2);
+    const body = JSON.parse(text);
     for (const post of body.post_stream?.posts ?? []) {
       if (!loaded.has(post.id)) {
         loaded.add(post.id);
@@ -367,34 +385,60 @@ function parseReaderTopic(markdown, normalized, fallbackTitle = "") {
 }
 
 async function fetchTopicViaReader(normalized) {
-  const requests = [];
-  for (let page = 1; page <= MAX_READER_TOPIC_PAGES; page += 1) {
-    const pageUrl = page === 1 ? normalized : `${normalized}?page=${page}`;
-    requests.push(fetchText(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 15000));
-  }
-  const settled = await Promise.allSettled(requests);
   const posts = [];
   let title = "";
-  for (const result of settled) {
-    if (result.status !== "fulfilled") continue;
-    const topic = parseReaderTopic(result.value, normalized);
-    if (topic.title && !title) title = topic.title;
-    for (const post of topic.posts) posts.push({ id: posts.length + 1, cooked: post.cooked });
-    if (posts.length >= MAX_TOPIC_POSTS) break;
+  let lastError = null;
+
+  for (let page = 1; page <= MAX_READER_TOPIC_PAGES; page += 1) {
+    const pageUrl = page === 1 ? normalized : `${normalized}?page=${page}`;
+    try {
+      const text = await fetchTextWithRetry(readerUrlForLinuxDo(pageUrl), "text/plain,*/*", 15000, 2);
+      const topic = parseReaderTopic(text, normalized);
+      if (topic.title && !title) title = topic.title;
+      for (const post of topic.posts) posts.push({ id: posts.length + 1, cooked: post.cooked });
+      if (posts.length >= MAX_TOPIC_POSTS) break;
+    } catch (error) {
+      lastError = error;
+      if (page === 1) await sleep(RETRY_DELAY_MS);
+    }
   }
-  if (!posts.length) throw new Error("Reader 回退未读取到公开帖子内容");
+
+  if (!posts.length) {
+    const detail = lastError ? `：${errorMessage(lastError)}` : "";
+    throw new Error(`Reader 回退未读取到公开帖子内容${detail}`);
+  }
   return { url: normalized, title, posts: posts.slice(0, MAX_TOPIC_POSTS) };
+}
+
+async function fetchTopicDirect(normalized) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= FETCH_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const text = await fetchText(`${normalized}.json`, "application/json,*/*", FETCH_TIMEOUT_MS);
+      const body = JSON.parse(text);
+      return { url: normalized, title: String(body.title ?? ""), posts: await fetchTopicPosts(normalized, body) };
+    } catch (error) {
+      lastError = error;
+      if (attempt >= FETCH_RETRY_ATTEMPTS || !isRetryableError(error)) break;
+      await sleep(RETRY_DELAY_MS * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function fetchTopic(url) {
   const normalized = normalizeTopic(url);
+  let directError = null;
   try {
-    const body = JSON.parse(await fetchText(`${normalized}.json`, "application/json,*/*"));
-    return { url: normalized, title: String(body.title ?? ""), posts: await fetchTopicPosts(normalized, body) };
+    return await fetchTopicDirect(normalized);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/^HTTP (403|429)$/.test(message)) throw error;
+    directError = error;
+  }
+
+  try {
     return await fetchTopicViaReader(normalized);
+  } catch (readerError) {
+    throw new Error(`直连读取失败：${errorMessage(directError)}；Reader 回退失败：${errorMessage(readerError)}`);
   }
 }
 
@@ -499,7 +543,6 @@ async function recordEvidence(env, evidence) {
 
   const current = await env.DB.prepare(`SELECT status, confidence_score FROM offers WHERE provider_key = ? AND period = ? AND code = ? LIMIT 1`)
     .bind(evidence.providerKey, evidence.period, evidence.code).first();
-
   const nextStatus = !current || rankStatus(evidence.status) >= rankStatus(current.status) ? evidence.status : current.status;
   const nextScore = Math.max(Number(current?.confidence_score ?? 0), evidence.confidenceScore);
   const sourceCount = await env.DB.prepare(`
@@ -521,11 +564,8 @@ async function recordEvidence(env, evidence) {
 }
 
 async function tryRecordEvidence(env, evidence) {
-  try {
-    await recordEvidence(env, evidence);
-  } catch (error) {
-    console.warn("record_evidence_failed", error instanceof Error ? error.message : String(error));
-  }
+  try { await recordEvidence(env, evidence); }
+  catch (error) { console.warn("record_evidence_failed", errorMessage(error)); }
 }
 
 function evidenceFor(period, item, sourceKey = "manual_admin") {
@@ -585,15 +625,7 @@ async function upsertVerifiedCode(env, period, item, status = "verified") {
       source_url = excluded.source_url,
       source_title = excluded.source_title,
       updated_at = CURRENT_TIMESTAMP
-  `).bind(
-    period,
-    item.code,
-    status,
-    item.confidence,
-    item.evidenceCount,
-    item.sourceUrl,
-    item.sourceTitle ?? "后台手动确认"
-  ).run();
+  `).bind(period, item.code, status, item.confidence, item.evidenceCount, item.sourceUrl, item.sourceTitle ?? "后台手动确认").run();
 }
 
 function verifiedFromCommunity(item) {
@@ -636,13 +668,11 @@ async function manual(env, data) {
 
 async function refresh(env, { force = false, triggerType = "manual_refresh", topicUrl = null, now = new Date() } = {}) {
   const period = periodOf(now);
-
   if (!force && !inAutoWindow(now)) {
     const message = `当前不在自动检查窗口，自动发现仅运行到每月 ${AUTO_WINDOW_END_DAY} 日`;
     await log(env, period, triggerType, "skipped", message);
     return { ok: true, skipped: true, period, message };
   }
-
   if (!force && await hasVerifiedCode(env, period)) {
     const message = "本月已有已确认兑换码，停止自动抓取";
     await log(env, period, triggerType, "skipped", message);
@@ -653,7 +683,7 @@ async function refresh(env, { force = false, triggerType = "manual_refresh", top
   try {
     topicRef = topicUrl ? { url: normalizeTopic(topicUrl), title: "指定 LINUX DO 帖子" } : await discoverMonthlyTopic(env, now);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await log(env, period, triggerType, "topic_not_found", message);
     return { ok: false, period, message };
   }
@@ -662,7 +692,6 @@ async function refresh(env, { force = false, triggerType = "manual_refresh", top
     const topic = await fetchTopic(topicRef.url);
     const item = communityCandidate(topic);
     if (item) await saveCandidate(env, period, item, "linuxdo_monthly_topic");
-
     await sourceCheck(
       env,
       period,
@@ -686,7 +715,7 @@ async function refresh(env, { force = false, triggerType = "manual_refresh", top
     await log(env, period, triggerType, "updated", message, verified.sourceUrl);
     return { ok: true, period, message, ...verified, topic: { url: topic.url, title: topic.title || topicRef.title } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await sourceCheck(env, period, "error", `帖子读取或识别失败：${message}`, 0, topicRef.url);
     await log(env, period, triggerType, "error", message, topicRef.url);
     return { ok: false, period, message, topic: topicRef };
@@ -704,9 +733,7 @@ async function testTopic(data) {
     title: topic.title,
     postCount: topic.posts.length,
     candidate,
-    message: candidate
-      ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}`
-      : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
+    message: candidate ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}` : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
   };
 }
 
@@ -780,7 +807,6 @@ export default {
     try {
       const url = new URL(request.url);
       const currentPeriod = periodOf();
-
       if (url.pathname === "/api/health" && request.method === "GET") return json(await health(env));
       if (url.pathname === "/api/latest" && request.method === "GET") return json(await latest(env), 200, { "Cache-Control": "public, max-age=300" });
       if (url.pathname === "/api/history" && request.method === "GET") return json(await history(env));
@@ -788,28 +814,25 @@ export default {
 
       if (url.pathname === "/api/admin/manual" && request.method === "POST") {
         try { return json(await manual(env, await body(request))); }
-        catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
+        catch (error) { return json({ ok: false, message: errorMessage(error) }, 422); }
       }
-
       if (url.pathname === "/api/admin/refresh" && request.method === "POST") {
-        const result = await refresh(env, { force: true, triggerType: "manual_refresh_open_admin", topicUrl: (await body(request)).topicUrl || null });
+        const data = await body(request);
+        const result = await refresh(env, { force: true, triggerType: "manual_refresh_open_admin", topicUrl: data.topicUrl || null });
         return json(result, result.ok ? 200 : 422);
       }
-
       if (url.pathname === "/api/admin/test-topic" && request.method === "POST") {
         try { return json(await testTopic(await body(request))); }
-        catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
+        catch (error) { return json({ ok: false, message: errorMessage(error) }, 422); }
       }
-
       if (url.pathname === "/api/admin/discover" && request.method === "POST") {
         try {
           const bestTopic = await discoverMonthlyTopic(env);
           return json({ ok: true, period: currentPeriod, bestTopic, ...(await listDiscovery(env, currentPeriod)) });
         } catch (error) {
-          return json({ ok: false, period: currentPeriod, message: error instanceof Error ? error.message : String(error), ...(await listDiscovery(env, currentPeriod)) }, 422);
+          return json({ ok: false, period: currentPeriod, message: errorMessage(error), ...(await listDiscovery(env, currentPeriod)) }, 422);
         }
       }
-
       if (url.pathname === "/api/admin/backfill-recent" && request.method === "POST") return json({ ok: false, message: "已移除固定码回填。请使用 /api/admin/manual 手动补录，或 /api/admin/refresh 自动发现/指定公开帖识别。" }, 410);
       if (url.pathname === "/api/admin/logs" && request.method === "GET") return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
       if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: currentPeriod, items: await listCandidates(env, currentPeriod) });
@@ -817,18 +840,14 @@ export default {
       if (url.pathname === "/api/admin/evidence" && request.method === "GET") return json({ period: currentPeriod, items: await listEvidence(env, currentPeriod) });
       if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: currentPeriod, ...(await listDiscovery(env, currentPeriod)) });
       if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: await listSources(env) });
-
       if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
         const data = await body(request);
-        const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`)
-          .bind(data.enabled ? 1 : 0, String(data.sourceKey ?? ""))
-          .run();
+        const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`).bind(data.enabled ? 1 : 0, String(data.sourceKey ?? "")).run();
         return json({ ok: Boolean(result.meta?.changes), sourceKey: data.sourceKey, enabled: Boolean(data.enabled) });
       }
-
       return env.ASSETS.fetch(request);
     } catch (error) {
-      console.error("request_failed", error instanceof Error ? error.message : String(error));
+      console.error("request_failed", errorMessage(error));
       return json({ ok: false, message: "服务暂时异常，请稍后再试" }, 500);
     }
   },
@@ -838,13 +857,4 @@ export default {
   }
 };
 
-export {
-  communityCandidate,
-  discoverMonthlyTopic,
-  fetchTopic,
-  inAutoWindow,
-  manual,
-  periodOf,
-  refresh,
-  testTopic
-};
+export { communityCandidate, discoverMonthlyTopic, fetchTopic, inAutoWindow, manual, periodOf, refresh, testTopic };
