@@ -1,6 +1,5 @@
 import oldWorker, {
   communityCandidate,
-  evidenceFromCandidate,
   fetchTopic,
   inAutoWindow,
   periodOf
@@ -28,49 +27,6 @@ const KNOWN_LINUXDO_TOPICS = {
   "2026-07": {
     url: "https://linux.do/t/topic/2504318",
     title: "宝可梦机场之七月免费兑换码猜猜我是谁"
-  }
-};
-
-const KNOWN_VERIFIED_CODES = {
-  "2026-03": {
-    code: "a732f321-8939-43cc-97b8-e2af81487dab",
-    sourceUrl: "https://t.me/s/linux_do_channel?after=315051",
-    sourceTitle: "LINUX DO 公开 Telegram 镜像",
-    confidence: 0.62,
-    evidenceCount: 1,
-    evidence: "公开镜像记录三月宝可梦机场兑换码。"
-  },
-  "2026-04": {
-    code: "雷丘",
-    sourceUrl: "https://linux.do/t/topic/1876094",
-    sourceTitle: "LINUX DO 四月月度帖社区共识",
-    confidence: 0.92,
-    evidenceCount: 8,
-    evidence: "LINUX DO 四月月度帖评论区多次出现“雷丘”，并有续费成功反馈。"
-  },
-  "2026-05": {
-    code: "金鱼王",
-    sourceUrl: "https://linux.do/t/topic/2092025",
-    sourceTitle: "LINUX DO 五月月度帖社区共识",
-    confidence: 0.94,
-    evidenceCount: 10,
-    evidence: "LINUX DO 五月月度帖评论区多次出现“金鱼王”。"
-  },
-  "2026-06": {
-    code: "火焰鸟",
-    sourceUrl: "https://linux.do/t/topic/2289939",
-    sourceTitle: "LINUX DO 六月月度帖社区共识",
-    confidence: 0.96,
-    evidenceCount: 10,
-    evidence: "LINUX DO 六月月度帖评论区多次出现“火焰鸟”，并有成功续费反馈。"
-  },
-  "2026-07": {
-    code: "小火马",
-    sourceUrl: "https://linux.do/t/topic/2504318",
-    sourceTitle: "LINUX DO 七月月度帖社区共识",
-    confidence: 0.98,
-    evidenceCount: 12,
-    evidence: "LINUX DO 七月月度帖评论区多次出现“小火马”，并有续期成功/成功续费等反馈。"
   }
 };
 
@@ -225,33 +181,33 @@ async function tryRecordEvidence(env, evidence) {
   try {
     await recordEvidence(env, evidence);
   } catch (error) {
-    console.warn("v2_record_evidence_failed", error instanceof Error ? error.message : String(error));
+    console.warn("record_evidence_failed", error instanceof Error ? error.message : String(error));
   }
 }
 
-function manualEvidence(period, item, reviewer = "open_admin") {
+function evidenceFor(period, item, sourceKey = "manual_admin") {
   const sourceUrl = item.sourceUrl ? safeUrl(item.sourceUrl) : "https://pokemon-code-index.xf959211192.workers.dev/admin.html";
-  const evidenceExcerpt = item.evidence || "后台手动补录";
+  const evidenceExcerpt = item.evidence || "后台写入或公开帖识别";
   return {
     providerKey: "pokemon_nebula",
     period,
     code: item.code,
-    sourceKey: item.sourceKey ?? "manual_admin",
-    sourceType: item.sourceType ?? "manual",
+    sourceKey,
+    sourceType: item.sourceType ?? (sourceKey === "linuxdo_monthly_topic" ? "linuxdo_topic" : "manual"),
     sourceUrl,
     referenceUrl: item.referenceUrl ?? item.sourceUrl ?? null,
     isOfficial: 0,
-    status: item.status ?? "checkout_verified",
-    confidenceScore: item.confidenceScore ?? 90,
+    status: item.status ?? (sourceKey === "linuxdo_monthly_topic" ? "corroborated" : "checkout_verified"),
+    confidenceScore: item.confidenceScore ?? (sourceKey === "linuxdo_monthly_topic" ? 65 : 90),
     evidenceExcerpt,
-    evidenceHash: hashText(["pokemon_nebula", period, item.code, sourceUrl, evidenceExcerpt].join("|")),
-    extractionMethod: item.extractionMethod ?? "manual_entry",
-    verificationMethod: item.verificationMethod ?? "open_admin_write",
-    reviewer
+    evidenceHash: hashText(["pokemon_nebula", period, item.code, sourceKey, sourceUrl, evidenceExcerpt].join("|")),
+    extractionMethod: item.extractionMethod ?? (sourceKey === "linuxdo_monthly_topic" ? "linuxdo_public_topic" : "manual_entry"),
+    verificationMethod: item.verificationMethod ?? (sourceKey === "linuxdo_monthly_topic" ? "community_consensus" : "open_admin_write"),
+    reviewer: item.reviewer ?? "open_admin"
   };
 }
 
-async function saveCandidate(env, period, item) {
+async function saveCandidate(env, period, item, sourceKey = item.sourceKey ?? "manual_admin") {
   await env.DB.prepare(`
     INSERT INTO code_candidates(period, code, source_key, source_name, source_type, source_url, confidence, evidence_count, evidence, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -263,16 +219,16 @@ async function saveCandidate(env, period, item) {
   `).bind(
     period,
     item.code,
-    item.sourceKey,
+    sourceKey,
     item.sourceName,
-    item.sourceType,
+    item.sourceType ?? (sourceKey === "linuxdo_monthly_topic" ? "linuxdo_topic" : "manual"),
     item.sourceUrl,
     item.confidence,
     item.evidenceCount,
     item.evidence
   ).run();
 
-  await tryRecordEvidence(env, item.sourceKey === "manual_admin" ? manualEvidence(period, item) : evidenceFromCandidate(period, item));
+  await tryRecordEvidence(env, evidenceFor(period, item, sourceKey));
 }
 
 async function upsertVerifiedCode(env, period, item, status = "verified") {
@@ -294,7 +250,7 @@ async function upsertVerifiedCode(env, period, item, status = "verified") {
     item.confidence,
     item.evidenceCount,
     item.sourceUrl,
-    item.sourceTitle ?? "LINUX DO 已知月度帖社区共识"
+    item.sourceTitle ?? "后台手动确认"
   ).run();
 }
 
@@ -306,81 +262,12 @@ function verifiedFromCommunity(item) {
     confidence: Number(item.confidence),
     evidenceCount: Number(item.evidenceCount),
     sourceUrl: item.sourceUrl,
-    sourceTitle: "LINUX DO 已知月度帖社区共识"
-  };
-}
-
-function knownCodeCandidate(period) {
-  const seed = KNOWN_VERIFIED_CODES[period];
-  if (!seed) return null;
-  return {
-    code: seed.code,
+    sourceTitle: "LINUX DO 月度帖社区共识",
     sourceKey: "linuxdo_monthly_topic",
-    sourceName: seed.sourceTitle,
+    sourceName: "LINUX DO 月度帖社区共识",
     sourceType: "linuxdo_topic",
-    sourceUrl: seed.sourceUrl,
-    confidence: seed.confidence,
-    evidenceCount: seed.evidenceCount,
-    evidence: seed.evidence
+    evidence: item.evidence ?? "LINUX DO 评论区社区共识"
   };
-}
-
-async function seedKnownVerifiedCode(env, period, triggerType = "known_code_seed") {
-  const seed = KNOWN_VERIFIED_CODES[period];
-  if (!seed) return { ok: false, seeded: false, reason: "no_known_code", period };
-  if (await hasVerifiedCode(env, period)) return { ok: true, seeded: false, skipped: true, reason: "already_verified", period };
-
-  const item = knownCodeCandidate(period);
-  await saveCandidate(env, period, item);
-  await upsertVerifiedCode(env, period, {
-    code: seed.code,
-    confidence: seed.confidence,
-    evidenceCount: seed.evidenceCount,
-    sourceUrl: seed.sourceUrl,
-    sourceTitle: seed.sourceTitle
-  });
-  await sourceCheck(
-    env,
-    period,
-    "known_code_seeded",
-    `v2 已按内置公开证据自动写入：${seed.code}`,
-    1,
-    seed.sourceUrl
-  );
-  await log(env, period, triggerType, "updated", `v2 已按内置公开证据自动写入 ${period}：${seed.code}`, seed.sourceUrl);
-
-  return {
-    ok: true,
-    seeded: true,
-    period,
-    code: seed.code,
-    confidence: seed.confidence,
-    evidenceCount: seed.evidenceCount,
-    sourceUrl: seed.sourceUrl,
-    sourceTitle: seed.sourceTitle,
-    message: `已自动写入 ${period} 兑换码：${seed.code}`
-  };
-}
-
-async function seedAllKnownVerifiedCodes(env, triggerType = "known_code_seed_all") {
-  const results = [];
-  for (const period of Object.keys(KNOWN_VERIFIED_CODES).sort()) {
-    try {
-      results.push(await seedKnownVerifiedCode(env, period, triggerType));
-    } catch (error) {
-      results.push({ ok: false, period, message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return { ok: results.some((item) => item.ok), results };
-}
-
-async function seedCurrentKnownCodeIfNeeded(env, triggerType) {
-  try {
-    return await seedKnownVerifiedCode(env, periodOf(), triggerType);
-  } catch (error) {
-    console.warn("v2_seed_current_failed", error instanceof Error ? error.message : String(error));
-    return { ok: false, seeded: false, message: error instanceof Error ? error.message : String(error) };
-  }
 }
 
 async function manual(env, data) {
@@ -399,7 +286,7 @@ async function manual(env, data) {
     evidence: "开放后台手动补录并确认",
     sourceTitle: "开放后台手动确认"
   };
-  await saveCandidate(env, period, item);
+  await saveCandidate(env, period, item, "manual_admin");
   await upsertVerifiedCode(env, period, item);
   await log(env, period, "manual_write_open_admin", "updated", `开放后台写入 ${period} 兑换码：${code}`, sourceUrl);
   return { ok: true, period, code };
@@ -428,18 +315,15 @@ function knownTopicFor(period) {
 
 async function refreshKnownTopic(env, { force = false, triggerType = "manual_refresh", topicUrl = null, now = new Date() } = {}) {
   const period = periodOf(now);
-  const seeded = await seedKnownVerifiedCode(env, period, `${triggerType}:known_code_seed`);
-  if (seeded.seeded || seeded.skipped) return seeded;
-
   const manualTopicUrl = normalizeManualTopicUrl(topicUrl);
-  const knownTopic = manualTopicUrl ? { url: manualTopicUrl, title: "管理员指定 LINUX DO 帖子" } : knownTopicFor(period);
+  const knownTopic = manualTopicUrl ? { url: manualTopicUrl, title: "指定 LINUX DO 帖子" } : knownTopicFor(period);
 
   if (!knownTopic) {
-    return { ok: false, fallbackToOld: true, period, message: "没有配置本月已知 LINUX DO 帖子，回退旧自动搜索" };
+    return { ok: false, period, message: "没有配置本月已知 LINUX DO 帖子，请在管理页填写帖子地址或手动补录" };
   }
 
   if (!force && !inAutoWindow(now) && !inKnownTopicGraceWindow(now)) {
-    const message = `当前不在自动检查窗口，且已知帖子兜底仅运行到每月 ${KNOWN_TOPIC_GRACE_DAY} 日`;
+    const message = `当前不在自动检查窗口，已知帖兜底仅运行到每月 ${KNOWN_TOPIC_GRACE_DAY} 日`;
     await log(env, period, triggerType, "skipped", message, knownTopic.url);
     return { ok: true, skipped: true, period, message };
   }
@@ -454,14 +338,14 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
     const topic = await fetchTopic(knownTopic.url);
     const item = communityCandidate(topic);
 
-    if (item) await saveCandidate(env, period, item);
+    if (item) await saveCandidate(env, period, item, "linuxdo_monthly_topic");
     await sourceCheck(
       env,
       period,
       item ? "candidate_found" : "no_candidate",
       item
-        ? `v2 已知帖兜底：读取评论 ${topic.posts.length} 条；社区候选：${item.code}；证据分数：${item.evidenceCount}`
-        : `v2 已知帖兜底：读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`,
+        ? `读取评论 ${topic.posts.length} 条；社区候选：${item.code}；证据分数：${item.evidenceCount}`
+        : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`,
       item ? 1 : 0,
       topic.url
     );
@@ -474,7 +358,7 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
     }
 
     await upsertVerifiedCode(env, period, verified);
-    const message = `v2 已通过已知 LINUX DO 月度帖更新 ${period} 兑换码：${verified.code}`;
+    const message = `已通过 LINUX DO 月度帖更新 ${period} 兑换码：${verified.code}`;
     await log(env, period, triggerType, "updated", message, verified.sourceUrl);
     return {
       ok: true,
@@ -488,11 +372,8 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
       topic: { url: topic.url, title: topic.title }
     };
   } catch (error) {
-    const seedAfterError = await seedKnownVerifiedCode(env, period, `${triggerType}:known_code_after_error`);
-    if (seedAfterError.seeded || seedAfterError.skipped) return seedAfterError;
-
     const message = error instanceof Error ? error.message : String(error);
-    await sourceCheck(env, period, "error", `v2 已知帖兜底失败：${message}`, 0, knownTopic.url);
+    await sourceCheck(env, period, "error", `已知帖兜底失败：${message}`, 0, knownTopic.url);
     await log(env, period, triggerType, "error", message, knownTopic.url);
     return { ok: false, period, message, topic: knownTopic };
   }
@@ -530,10 +411,10 @@ async function listEvidence(env, period) {
 }
 
 async function listDiscovery(env, period) {
-  const planned = Object.entries(KNOWN_VERIFIED_CODES).map(([itemPeriod, item]) => ({
-    kind: "known_verified_code",
-    query: `${itemPeriod} ${item.code}`,
-    purpose: "内置公开确认码兜底"
+  const planned = Object.entries(KNOWN_LINUXDO_TOPICS).map(([itemPeriod, item]) => ({
+    kind: "known_linuxdo_topic",
+    query: `${itemPeriod} ${item.title}`,
+    purpose: "已知公开月度帖；不包含固定兑换码"
   }));
   const { results } = await env.DB.prepare(`
     SELECT period, discovery_kind, query, title, source_url, score, updated_at
@@ -565,17 +446,11 @@ export default {
     const url = new URL(request.url);
     const currentPeriod = periodOf();
 
-    if ((url.pathname === "/api/seed-known" || url.pathname === "/api/admin/backfill-recent") && ["GET", "POST"].includes(request.method)) {
-      return json(await seedAllKnownVerifiedCodes(env, url.pathname === "/api/seed-known" ? "public_seed_known" : "backfill_recent_open_admin"));
-    }
-
     if (url.pathname === "/api/latest" && request.method === "GET") {
-      await seedCurrentKnownCodeIfNeeded(env, "public_latest_known_code_seed");
       return oldWorker.fetch(request, env, ctx);
     }
 
     if (url.pathname === "/api/history" && request.method === "GET") {
-      await seedAllKnownVerifiedCodes(env, "public_history_known_code_seed");
       return oldWorker.fetch(request, env, ctx);
     }
 
@@ -586,7 +461,6 @@ export default {
         triggerType: "manual_refresh_open_admin",
         topicUrl: data.topicUrl || null
       });
-      if (result.fallbackToOld) return json(await seedAllKnownVerifiedCodes(env, "manual_refresh_open_admin_seed_all"));
       return json(result, result.ok ? 200 : 422);
     }
 
@@ -610,7 +484,11 @@ export default {
     if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: currentPeriod, ...(await listDiscovery(env, currentPeriod)) });
 
     if (url.pathname === "/api/admin/discover" && request.method === "POST") {
-      return json({ ok: true, period: currentPeriod, bestTopic: knownTopicFor(currentPeriod), knownCodes: KNOWN_VERIFIED_CODES });
+      return json({ ok: true, period: currentPeriod, bestTopic: knownTopicFor(currentPeriod), knownTopics: KNOWN_LINUXDO_TOPICS });
+    }
+
+    if (url.pathname === "/api/admin/backfill-recent" && request.method === "POST") {
+      return json({ ok: false, message: "已移除固定码回填。请使用 /api/admin/manual 手动补录，或 /api/admin/refresh 指定公开帖识别。" }, 410);
     }
 
     if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: await listSources(env) });
@@ -639,9 +517,6 @@ export default {
 
 export {
   KNOWN_LINUXDO_TOPICS,
-  KNOWN_VERIFIED_CODES,
   manual,
-  refreshKnownTopic,
-  seedAllKnownVerifiedCodes,
-  seedKnownVerifiedCode
+  refreshKnownTopic
 };
