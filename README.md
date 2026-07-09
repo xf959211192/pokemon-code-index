@@ -1,91 +1,120 @@
 # pokemon-code-index
 
-使用 Cloudflare Workers、D1 和 Cron Trigger 的公开兑换码聚合站模板。
+使用 Cloudflare Workers、D1 和 Cron Trigger 的公开兑换码记录与管理页。
+
+## 当前状态
+
+- Worker 入口：`src/index-v2.js`。
+- 数据库：Cloudflare D1，结构在 `schema.sql`。
+- 首页：`public/index.html`。
+- 管理页：`public/admin.html`。
+- 后台 Token 鉴权：已按确认要求取消。
+- 代码中不再固定任何兑换码。
 
 ## 自动更新规则
 
 - 每天 UTC 01:00（北京时间 09:00）触发一次定时任务。
-- 原自动搜索仍保留：北京时间每月 1 日至 7 日执行公开来源抓取。
-- 新增 v2 已知 LINUX DO 月度帖兜底：当本月配置了已知帖子时，可在每月 1 日至 14 日内定时读取该帖并从评论区提取社区共识。
-- 新增 v2 已知确认码自动写入：当 `KNOWN_VERIFIED_CODES` 配置了公开确认码，且 D1 还没有对应月份已确认记录时，Cron、管理员刷新、`/api/latest` 和 `/api/history` 公开读取都会自动写入。
-- 新增 `/api/seed-known`：公开触发回填 `KNOWN_VERIFIED_CODES` 中的历史月份。
-- 当数据库存在对应月份已确认兑换码后，内置回填会跳过该月份。
-- 管理页的“立即刷新全部来源”无视上述时间限制；如果填写了指定 LINUX DO 帖子地址，会直接抓取该公开帖子。
-- 每月 14 日后仍未找到时，自动任务停止实际兜底抓取，等待管理员手动刷新或补录。
-- 进入下个月后自动开始新一轮检查。
+- 如果当前月份配置了已知 LINUX DO 月度帖，Worker 会尝试读取公开帖子评论区并提取社区共识。
+- 自动检查窗口：北京时间每月 1 日至 14 日。
+- 如果当月数据库已经有已确认兑换码，自动任务会跳过。
+- 如果没有配置当月帖子，或帖子识别失败，需要在管理页手动补录。
 
-## v2 入口说明
+## 主要接口
 
-当前 `wrangler.jsonc` 使用 `src/index-v2.js` 作为 Worker 入口。v2 不删除旧功能，而是：
+### 公开读取
 
-1. 拦截 `/api/admin/*` 后台接口并取消 Token 校验；
-2. 拦截 `/api/latest`，在公开首页读取时自动补写当月已知确认码；
-3. 拦截 `/api/history`，在历史记录读取时自动回填已知历史月份；
-4. 提供 `/api/seed-known`，用于公开触发内置历史码回填；
-5. 优先使用 `KNOWN_VERIFIED_CODES` 内置公开确认码写入 D1；
-6. 若没有内置确认码，再使用已知 LINUX DO 月度帖兜底；
-7. 如果没有配置本月已知帖子，则回退旧版自动搜索。
-
-管理员上传/手动补录功能仍然保留，但当前版本已按确认要求取消后台 Token 鉴权。
-
-## 当前已知确认码
-
-| 月份 | 兑换码 | 来源 |
-|---|---|---|
-| 2026-03 | a732f321-8939-43cc-97b8-e2af81487dab | https://t.me/s/linux_do_channel?after=315051 |
-| 2026-04 | 雷丘 | https://linux.do/t/topic/1876094 |
-| 2026-05 | 金鱼王 | https://linux.do/t/topic/2092025 |
-| 2026-06 | 火焰鸟 | https://linux.do/t/topic/2289939 |
-| 2026-07 | 小火马 | https://linux.do/t/topic/2504318 |
-
-如果下个月自动搜索仍失败，可以在 `src/index-v2.js` 的 `KNOWN_VERIFIED_CODES` 里追加新月份。
-
-## 已接入来源
-
-| 来源 | 行为 |
+| 接口 | 用途 |
 |---|---|
-| 官方 Telegram 通知频道 `https://t.me/s/pokemon521` | 抓取公开频道网页。若官方明确发布文本兑换码，直接确认；若为图片谜题，记录公告后等待社区答案。 |
-| 官方 Telegram 群组入口 `https://t.me/pokemon_love` | 只检查公开入口是否可访问，不抓取群聊内容。 |
-| LINUX DO 月度讨论帖 | 自动搜索当月公开帖子，从评论区重复答案中提取社区共识。 |
-| 已知 LINUX DO 月度帖兜底 | 当搜索失败但已知帖子 URL 已配置时，直接读取该公开帖并提取社区共识。 |
-| 已知确认码自动写入 | 当管理员已人工确认公开来源，可作为代码兜底写入 D1。 |
-| 管理员手动补录 | 当前已取消 Token 校验，可直接写入。 |
+| `GET /api/latest` | 首页读取最新兑换码。 |
+| `GET /api/history` | 读取历史兑换码。 |
+| `GET /api/health` | 服务状态检查。 |
+| `GET /api/public-links` | 读取公开频道链接。 |
 
-## 自动确认规则
+### 后台管理
 
-1. 官方 Telegram 明确发布文本兑换码：直接确认。
-2. 至少两个不同来源得到相同答案，且至少一个来源为官方频道或 LINUX DO：自动确认。
-3. LINUX DO 评论区出现明显社区共识，可信度不低于 75%，证据分数不低于 4：自动确认。
-4. 只有第三方页面出现答案：仅保存为候选，不自动发布。
-5. `KNOWN_VERIFIED_CODES` 只用于已经由管理员确认过的公开证据兜底，不用于未知月份猜测。
+当前后台接口不需要 Token。
 
-## 全新部署
+| 接口 | 用途 |
+|---|---|
+| `POST /api/admin/manual` | 手动写入指定月份兑换码。 |
+| `POST /api/admin/refresh` | 按已知帖子或指定帖子自动识别。 |
+| `POST /api/admin/test-topic` | 只测试某个 LINUX DO 帖子，不写入。 |
+| `GET /api/admin/logs` | 查看刷新日志。 |
+| `GET /api/admin/candidates` | 查看本月候选码。 |
+| `GET /api/admin/offers` | 查看本月优惠记录。 |
+| `GET /api/admin/evidence` | 查看本月证据记录。 |
+| `GET /api/admin/discovery` | 查看已知月度帖。 |
+| `POST /api/admin/discover` | 返回当前内置已知帖信息。 |
+| `GET /api/admin/sources` | 查看数据源。 |
+| `POST /api/admin/sources/toggle` | 启用或停用数据源。 |
+
+## 下个月怎么用
+
+### 已经知道兑换码
+
+打开管理页：
+
+```text
+https://你的地址.workers.dev/admin.html
+```
+
+在“手动补录”里填写：
+
+```text
+月份：2026-08
+兑换码：实际兑换码
+公开来源地址：Linux.do 或其他公开来源
+```
+
+或者直接调用：
+
+```bash
+curl -X POST "https://你的地址.workers.dev/api/admin/manual" \
+  -H "Content-Type: application/json" \
+  -d '{"period":"2026-08","code":"实际兑换码","sourceUrl":"https://linux.do/t/topic/xxxxxxx"}'
+```
+
+### 只知道 Linux.do 帖子
+
+调用：
+
+```bash
+curl -X POST "https://你的地址.workers.dev/api/admin/refresh" \
+  -H "Content-Type: application/json" \
+  -d '{"topicUrl":"https://linux.do/t/topic/xxxxxxx"}'
+```
+
+或者在管理页“按帖子识别”里填写帖子地址后点击“立即刷新”。
+
+## 已知帖子配置
+
+`src/index-v2.js` 里只保留已知 LINUX DO 帖子地址，不保留兑换码。
+
+示例：
+
+```js
+const KNOWN_LINUXDO_TOPICS = {
+  "2026-07": {
+    url: "https://linux.do/t/topic/2504318",
+    title: "宝可梦机场之七月免费兑换码猜猜我是谁"
+  }
+};
+```
+
+下个月如果想让定时任务自动尝试识别，可只追加当月帖子地址，不要写死兑换码。
+
+## 部署
 
 ```bash
 npm install
-npx wrangler login
-npx wrangler d1 create pokemon-code-index --binding DB --update-config
-npx wrangler d1 execute pokemon-code-index --remote --file=./schema.sql
 npx wrangler deploy
 ```
 
-访问：
-
-- 首页：`https://你的地址.workers.dev/`
-- 管理页：`https://你的地址.workers.dev/admin.html`
-- 公开回填：`https://你的地址.workers.dev/api/seed-known`
-
-## 从单来源旧版升级
-
-新版数据库结构兼容旧版。进入旧项目目录后，用新版文件覆盖，再执行：
+首次初始化或结构更新 D1：
 
 ```bash
-npm install
 npx wrangler d1 execute pokemon-code-index --remote --file=./schema.sql
-npx wrangler deploy
 ```
-
-`schema.sql` 使用 `CREATE TABLE IF NOT EXISTS` 和 `INSERT OR IGNORE`，不会删除原有兑换码历史。
 
 ## 本地调试
 
@@ -103,9 +132,8 @@ npm run dev
 
 ## 注意
 
-- 当前版本已取消后台 Token 鉴权，公网部署后任何人知道后台接口都可能写入数据。
+- 当前后台接口已公开，任何知道后台地址的人都可能写入数据或修改数据源状态。
 - 只抓取无需登录即可访问的公开网页。
 - 不绕过验证码、登录限制或访问权限。
 - Telegram 群聊记录不纳入自动抓取。
-- 官方频道若只发布图片谜题，当前模板不会识别图片内容；此时依赖 LINUX DO 评论区共识或管理员手动补录。
-- 若外部页面返回 `403`、`429` 或结构发生变化，可在管理页查看来源状态并手动处理。
+- 如果 LINUX DO 页面返回 `403`、`429` 或结构变化，使用管理页手动补录。
