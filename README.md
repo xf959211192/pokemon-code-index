@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-- Worker 入口：`src/index-v2.js`。
+- Worker 入口：`src/index.js`。
 - 数据库：Cloudflare D1，结构在 `schema.sql`。
 - 首页：`public/index.html`。
 - 管理页：`public/admin.html`。
@@ -14,10 +14,11 @@
 ## 自动更新规则
 
 - 每天 UTC 01:00（北京时间 09:00）触发一次定时任务。
-- 如果当前月份配置了已知 LINUX DO 月度帖，Worker 会尝试读取公开帖子评论区并提取社区共识。
+- Worker 会先搜索 LINUX DO 站内话题，再扫描 `linux.do/c/welfare/36` 福利羊毛分类，最后从已发现的宝可梦历史帖关联链接继续找当月帖。
+- 找到当月公开帖后，读取评论区并提取社区共识；只有候选可信度 ≥ 75% 且证据分数 ≥ 4 才会自动写入。
 - 自动检查窗口：北京时间每月 1 日至 14 日。
 - 如果当月数据库已经有已确认兑换码，自动任务会跳过。
-- 如果没有配置当月帖子，或帖子识别失败，需要在管理页手动补录。
+- 如果自动发现或评论区识别失败，需要在管理页手动补录。
 
 ## 主要接口
 
@@ -37,18 +38,44 @@
 | 接口 | 用途 |
 |---|---|
 | `POST /api/admin/manual` | 手动写入指定月份兑换码。 |
-| `POST /api/admin/refresh` | 按已知帖子或指定帖子自动识别。 |
+| `POST /api/admin/refresh` | 自动发现当月帖子并识别；也可传入 `topicUrl` 指定帖子。 |
 | `POST /api/admin/test-topic` | 只测试某个 LINUX DO 帖子，不写入。 |
+| `POST /api/admin/discover` | 只执行帖子发现，不写入兑换码。 |
 | `GET /api/admin/logs` | 查看刷新日志。 |
 | `GET /api/admin/candidates` | 查看本月候选码。 |
 | `GET /api/admin/offers` | 查看本月优惠记录。 |
 | `GET /api/admin/evidence` | 查看本月证据记录。 |
-| `GET /api/admin/discovery` | 查看已知月度帖。 |
-| `POST /api/admin/discover` | 返回当前内置已知帖信息。 |
+| `GET /api/admin/discovery` | 查看自动发现记录。 |
 | `GET /api/admin/sources` | 查看数据源。 |
 | `POST /api/admin/sources/toggle` | 启用或停用数据源。 |
 
 ## 下个月怎么用
+
+### 自动流程
+
+通常不需要手动传兑换码。Cron 会每天执行：
+
+```text
+发现 LINUX DO 当月帖 → 读取评论 → 提取社区共识 → 写入 D1
+```
+
+也可以手动触发一次自动发现与识别：
+
+```bash
+curl -X POST "https://你的地址.workers.dev/api/admin/refresh" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+### 只知道 Linux.do 帖子
+
+```bash
+curl -X POST "https://你的地址.workers.dev/api/admin/refresh" \
+  -H "Content-Type: application/json" \
+  -d '{"topicUrl":"https://linux.do/t/topic/xxxxxxx"}'
+```
+
+或者在管理页“按帖子识别”里填写帖子地址后点击“立即刷新”。
 
 ### 已经知道兑换码
 
@@ -74,34 +101,11 @@ curl -X POST "https://你的地址.workers.dev/api/admin/manual" \
   -d '{"period":"2026-08","code":"实际兑换码","sourceUrl":"https://linux.do/t/topic/xxxxxxx"}'
 ```
 
-### 只知道 Linux.do 帖子
-
-调用：
-
-```bash
-curl -X POST "https://你的地址.workers.dev/api/admin/refresh" \
-  -H "Content-Type: application/json" \
-  -d '{"topicUrl":"https://linux.do/t/topic/xxxxxxx"}'
-```
-
-或者在管理页“按帖子识别”里填写帖子地址后点击“立即刷新”。
-
 ## 已知帖子配置
 
-`src/index-v2.js` 里只保留已知 LINUX DO 帖子地址，不保留兑换码。
+`src/index.js` 里只保留少量已知 LINUX DO 帖子地址，不保留兑换码。它们只作为搜索失败时的帖子入口兜底。
 
-示例：
-
-```js
-const KNOWN_LINUXDO_TOPICS = {
-  "2026-07": {
-    url: "https://linux.do/t/topic/2504318",
-    title: "宝可梦机场之七月免费兑换码猜猜我是谁"
-  }
-};
-```
-
-下个月如果想让定时任务自动尝试识别，可只追加当月帖子地址，不要写死兑换码。
+下个月如果想增强稳定性，可以只追加当月帖子地址，不要写死兑换码。
 
 ## 部署
 
@@ -129,6 +133,13 @@ npm run dev
 - 首页：`http://localhost:8787/`
 - 管理页：`http://localhost:8787/admin.html`
 - 模拟 Cron：`http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+1+*+*+*`
+
+## 测试重点
+
+- `npm run dev` 启动后访问 `/api/health`，确认 D1 可读。
+- 管理页点击“查看已知帖子”，确认 `/api/admin/discover` 能发现候选帖。
+- 管理页填写公开帖子地址后点击“测试帖子识别”，确认候选码和证据分数。
+- 评论区识别达到阈值后，`/api/admin/refresh` 会写入 D1。
 
 ## 注意
 
