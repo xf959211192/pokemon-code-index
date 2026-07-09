@@ -32,6 +32,17 @@ const KNOWN_LINUXDO_TOPICS = {
   }
 };
 
+const KNOWN_VERIFIED_CODES = {
+  "2026-07": {
+    code: "小火马",
+    sourceUrl: "https://linux.do/t/topic/2504318",
+    sourceTitle: "LINUX DO 七月月度帖社区共识",
+    confidence: 0.98,
+    evidenceCount: 12,
+    evidence: "LINUX DO 七月月度帖评论区多次出现“小火马”，并有续期成功/成功续费等反馈。"
+  }
+};
+
 function json(data, status = 200, headers = {}) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store", ...headers } });
 }
@@ -210,7 +221,7 @@ async function upsertVerifiedCode(env, period, item) {
     item.confidence,
     item.evidenceCount,
     item.sourceUrl,
-    "LINUX DO 已知月度帖社区共识"
+    item.sourceTitle ?? "LINUX DO 已知月度帖社区共识"
   ).run();
 }
 
@@ -224,6 +235,67 @@ function verifiedFromCommunity(item) {
     sourceUrl: item.sourceUrl,
     sourceTitle: "LINUX DO 已知月度帖社区共识"
   };
+}
+
+function knownCodeCandidate(period) {
+  const seed = KNOWN_VERIFIED_CODES[period];
+  if (!seed) return null;
+  return {
+    code: seed.code,
+    sourceKey: "linuxdo_monthly_topic",
+    sourceName: seed.sourceTitle,
+    sourceType: "linuxdo_topic",
+    sourceUrl: seed.sourceUrl,
+    confidence: seed.confidence,
+    evidenceCount: seed.evidenceCount,
+    evidence: seed.evidence
+  };
+}
+
+async function seedKnownVerifiedCode(env, period, triggerType = "known_code_seed") {
+  const seed = KNOWN_VERIFIED_CODES[period];
+  if (!seed) return { ok: false, seeded: false, reason: "no_known_code" };
+  if (await hasVerifiedCode(env, period)) return { ok: true, seeded: false, skipped: true, reason: "already_verified", period };
+
+  const item = knownCodeCandidate(period);
+  await saveCandidate(env, period, item);
+  await upsertVerifiedCode(env, period, {
+    code: seed.code,
+    confidence: seed.confidence,
+    evidenceCount: seed.evidenceCount,
+    sourceUrl: seed.sourceUrl,
+    sourceTitle: seed.sourceTitle
+  });
+  await sourceCheck(
+    env,
+    period,
+    "known_code_seeded",
+    `v2 已按内置公开证据自动写入：${seed.code}`,
+    1,
+    seed.sourceUrl
+  );
+  await log(env, period, triggerType, "updated", `v2 已按内置公开证据自动写入 ${period}：${seed.code}`, seed.sourceUrl);
+
+  return {
+    ok: true,
+    seeded: true,
+    period,
+    code: seed.code,
+    confidence: seed.confidence,
+    evidenceCount: seed.evidenceCount,
+    sourceUrl: seed.sourceUrl,
+    sourceTitle: seed.sourceTitle,
+    message: `已自动写入 ${period} 兑换码：${seed.code}`
+  };
+}
+
+async function seedCurrentKnownCodeIfNeeded(env, triggerType) {
+  try {
+    return await seedKnownVerifiedCode(env, periodOf(), triggerType);
+  } catch (error) {
+    console.warn("v2_seed_current_failed", error instanceof Error ? error.message : String(error));
+    return { ok: false, seeded: false, message: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function normalizeManualTopicUrl(topicUrl) {
@@ -240,6 +312,9 @@ function knownTopicFor(period) {
 
 async function refreshKnownTopic(env, { force = false, triggerType = "manual_refresh", topicUrl = null, now = new Date() } = {}) {
   const period = periodOf(now);
+  const seeded = await seedKnownVerifiedCode(env, period, `${triggerType}:known_code_seed`);
+  if (seeded.seeded || seeded.skipped) return seeded;
+
   const manualTopicUrl = normalizeManualTopicUrl(topicUrl);
   const knownTopic = manualTopicUrl ? { url: manualTopicUrl, title: "管理员指定 LINUX DO 帖子" } : knownTopicFor(period);
 
@@ -297,6 +372,9 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
       topic: { url: topic.url, title: topic.title }
     };
   } catch (error) {
+    const seedAfterError = await seedKnownVerifiedCode(env, period, `${triggerType}:known_code_after_error`);
+    if (seedAfterError.seeded || seedAfterError.skipped) return seedAfterError;
+
     const message = error instanceof Error ? error.message : String(error);
     await sourceCheck(env, period, "error", `v2 已知帖兜底失败：${message}`, 0, knownTopic.url);
     await log(env, period, triggerType, "error", message, knownTopic.url);
@@ -312,6 +390,11 @@ async function runOldScheduled(controller, env) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/latest" && request.method === "GET") {
+      await seedCurrentKnownCodeIfNeeded(env, "public_latest_known_code_seed");
+      return oldWorker.fetch(request, env, ctx);
+    }
 
     if (url.pathname === "/api/admin/refresh" && request.method === "POST") {
       if (!authorized(request, env)) return json({ ok: false, message: "管理员令牌错误" }, 401);
@@ -345,5 +428,7 @@ export default {
 
 export {
   KNOWN_LINUXDO_TOPICS,
-  refreshKnownTopic
+  KNOWN_VERIFIED_CODES,
+  refreshKnownTopic,
+  seedKnownVerifiedCode
 };
