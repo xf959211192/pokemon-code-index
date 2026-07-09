@@ -24,39 +24,38 @@
     th, td { padding: 10px 6px; border-bottom: 1px solid #edf1f5; text-align: left; vertical-align: top; }
     th { color: #55657b; font-weight: 600; }
     td a { color: #315c98; }
-    .status { display: inline-block; border-radius: 999px; padding: 3px 8px; background: #eef4fb; color: #315c98; font-size: 12px; }
-    .muted { color: #7b899c; }
+    .warn { background: #fff8e5; border: 1px solid #f3df9c; color: #745c13; border-radius: 12px; padding: 12px 14px; margin-top: 12px; line-height: 1.6; }
   </style>
 </head>
 <body>
   <main>
     <h1>兑换码管理</h1>
-    <p class="sub">管理员令牌仅保存在当前浏览器。自动刷新会依次检查官方频道、官方群入口和 LINUX DO 月度讨论帖。自动识别失败时，可以指定 LINUX DO 帖子或手动录入。</p>
+    <p class="sub">当前版本已取消后台 Token 校验。这个页面可直接刷新、回填、测试帖子和手动写入。公网部署时请注意：任何知道后台地址的人都可能改写数据。</p>
 
     <section class="card">
-      <label>管理员令牌<input id="token" type="password" placeholder="ADMIN_TOKEN" /></label>
-      <button id="saveToken">保存令牌</button>
       <a class="button" href="/">返回首页</a>
       <button id="checkHealth" class="secondary">检查服务状态</button>
-      <button id="runDiscovery" class="secondary">搜索发现入口</button>
-      <button id="backfillRecent" class="secondary">回填最近 5 个月</button>
+      <button id="seedKnown" class="secondary">回填内置历史码</button>
+      <button id="runDiscovery" class="secondary">查看内置发现信息</button>
+      <button id="backfillRecent" class="secondary">回填最近记录</button>
       <button id="reloadAll" class="secondary">刷新后台数据</button>
+      <div class="warn">后台接口已公开：/api/admin/manual、/api/admin/refresh、/api/admin/sources/toggle 等不再要求 Authorization。</div>
     </section>
 
     <div class="grid">
       <section class="card">
         <h2>强制刷新</h2>
-        <p class="sub">留空时自动检查全部启用来源。填写后，LINUX DO 来源会直接抓取指定公开帖子；其他启用来源仍会正常检查。</p>
-        <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/2289939" /></label>
+        <p class="sub">留空时优先使用内置确认码和已知月度帖。填写后，直接抓取指定 LINUX DO 公开帖子。</p>
+        <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/2504318" /></label>
         <button id="testTopic" class="secondary">测试帖子识别</button>
-        <button id="refresh">立即刷新全部来源</button>
+        <button id="refresh">立即刷新</button>
       </section>
 
       <section class="card">
         <h2>手动补录</h2>
-        <label>月份（可留空，默认当月）<input id="period" placeholder="2026-06" /></label>
-        <label>兑换码<input id="code" placeholder="火焰鸟" /></label>
-        <label>公开来源地址（可选）<input id="sourceUrl" placeholder="https://linux.do/t/topic/2289939" /></label>
+        <label>月份（可留空，默认当月）<input id="period" placeholder="2026-07" /></label>
+        <label>兑换码<input id="code" placeholder="小火马" /></label>
+        <label>公开来源地址（可选）<input id="sourceUrl" placeholder="https://linux.do/t/topic/2504318" /></label>
         <button id="manual">写入并确认</button>
       </section>
     </div>
@@ -68,7 +67,6 @@
 
     <section class="card">
       <h2>数据源</h2>
-      <p class="sub">官方群入口只检查是否可以访问，不会抓取群聊内容。第三方页面仅作辅助线索，单独出现的结果不会自动发布。</p>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>来源</th><th>类型</th><th>状态</th><th>最近检查</th><th>最近结果</th><th>操作</th></tr></thead>
@@ -89,7 +87,6 @@
 
     <section class="card">
       <h2>搜索发现</h2>
-      <p class="sub">按商家别名、套餐关键词、公开频道和月份生成查询。当前 Worker 会先尝试 LINUX DO 公开站内搜索；若被防护拦截，则回退扫描福利羊毛公开分类页。</p>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>类型</th><th>查询</th><th>用途</th></tr></thead>
@@ -106,7 +103,6 @@
 
     <section class="card">
       <h2>优惠记录</h2>
-      <p class="sub">这里按证据聚合展示优惠码状态。第三方单独报告只进入记录，不会自动发布到首页。</p>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>兑换码</th><th>状态</th><th>可信度</th><th>来源数</th><th>最后发现</th><th>说明</th></tr></thead>
@@ -117,7 +113,6 @@
 
     <section class="card">
       <h2>证据记录</h2>
-      <p class="sub">保留来源地址、提取方式和证据摘要，用于人工复核和后续失效检测。</p>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>时间</th><th>兑换码</th><th>来源</th><th>状态</th><th>分数</th><th>提取方式</th><th>证据摘要</th></tr></thead>
@@ -139,28 +134,24 @@
 
   <script>
     const el = (id) => document.getElementById(id);
-    el("token").value = localStorage.getItem("adminToken") || "";
-
-    function headers() {
-      return {
-        "Authorization": `Bearer ${el("token").value.trim()}`,
-        "Content-Type": "application/json"
-      };
-    }
 
     function output(value) {
       el("output").textContent = JSON.stringify(value, null, 2);
     }
 
     async function read(path) {
-      const response = await fetch(path, { headers: headers() });
+      const response = await fetch(path, { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
       return data;
     }
 
-    async function post(path, body) {
-      const response = await fetch(path, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+    async function post(path, body = {}) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
       const data = await response.json();
       output(data);
       if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
@@ -175,11 +166,12 @@
 
     function sourceLink(url, label) {
       const cell = document.createElement("td");
+      if (!url) return td(label || "--");
       const link = document.createElement("a");
       link.href = url;
       link.target = "_blank";
       link.rel = "noreferrer";
-      link.textContent = label;
+      link.textContent = label || url;
       cell.appendChild(link);
       return cell;
     }
@@ -192,7 +184,7 @@
         link.href = item.last_source_url;
         link.target = "_blank";
         link.rel = "noreferrer";
-        link.textContent = "查看图片";
+        link.textContent = "查看来源";
         cell.appendChild(link);
       }
       return cell;
@@ -227,7 +219,7 @@
         const row = document.createElement("tr");
         row.appendChild(td(item.code));
         row.appendChild(sourceLink(item.source_url, item.source_name));
-        row.appendChild(td(`${Math.round(Number(item.confidence) * 100)}%`));
+        row.appendChild(td(`${Math.round(Number(item.confidence || 0) * 100)}%`));
         row.appendChild(td(item.evidence_count));
         row.appendChild(td(item.updated_at));
         row.appendChild(td(item.evidence || "--"));
@@ -261,7 +253,7 @@
         const row = document.createElement("tr");
         row.appendChild(td(item.code));
         row.appendChild(td(item.status));
-        row.appendChild(td(`${item.confidence_score} / 100`));
+        row.appendChild(td(`${item.confidence_score ?? 0} / 100`));
         row.appendChild(td(item.source_count));
         row.appendChild(td(item.last_seen_at || item.updated_at));
         row.appendChild(td(item.trust_label || "--"));
@@ -288,9 +280,7 @@
       const data = await read("/api/admin/logs");
       el("logBody").replaceChildren(...(data.items || []).map((item) => {
         const row = document.createElement("tr");
-        for (const value of [item.created_at, item.period, item.trigger_type, item.result, item.message]) {
-          row.appendChild(td(value));
-        }
+        for (const value of [item.created_at, item.period, item.trigger_type, item.result, item.message]) row.appendChild(td(value));
         return row;
       }));
     }
@@ -303,52 +293,36 @@
       }
     }
 
-    el("saveToken").addEventListener("click", async () => {
-      localStorage.setItem("adminToken", el("token").value.trim());
-      output({ ok: true, message: "令牌已保存到当前浏览器" });
-      await reloadAll();
-    });
-
     el("reloadAll").addEventListener("click", reloadAll);
 
     el("checkHealth").addEventListener("click", async () => {
-      try {
-        output(await read("/api/health"));
-      } catch (error) {
-        output({ ok: false, message: error.message });
-      }
+      try { output(await read("/api/health")); }
+      catch (error) { output({ ok: false, message: error.message }); }
+    });
+
+    el("seedKnown").addEventListener("click", async () => {
+      try { await post("/api/seed-known", {}); }
+      finally { await reloadAll(); }
     });
 
     el("runDiscovery").addEventListener("click", async () => {
-      try {
-        await post("/api/admin/discover", {});
-      } finally {
-        await reloadAll();
-      }
+      try { await post("/api/admin/discover", {}); }
+      finally { await reloadAll(); }
     });
 
     el("backfillRecent").addEventListener("click", async () => {
-      try {
-        await post("/api/admin/backfill-recent", { months: 5 });
-      } finally {
-        await reloadAll();
-      }
+      try { await post("/api/admin/backfill-recent", { months: 5 }); }
+      finally { await reloadAll(); }
     });
 
     el("testTopic").addEventListener("click", async () => {
-      try {
-        await post("/api/admin/test-topic", { topicUrl: el("topicUrl").value.trim() || null });
-      } catch (error) {
-        output({ ok: false, message: error.message });
-      }
+      try { await post("/api/admin/test-topic", { topicUrl: el("topicUrl").value.trim() || null }); }
+      catch (error) { output({ ok: false, message: error.message }); }
     });
 
     el("refresh").addEventListener("click", async () => {
-      try {
-        await post("/api/admin/refresh", { topicUrl: el("topicUrl").value.trim() || null });
-      } finally {
-        await reloadAll();
-      }
+      try { await post("/api/admin/refresh", { topicUrl: el("topicUrl").value.trim() || null }); }
+      finally { await reloadAll(); }
     });
 
     el("manual").addEventListener("click", async () => {
@@ -363,7 +337,7 @@
       }
     });
 
-    if (el("token").value) reloadAll();
+    reloadAll();
   </script>
 </body>
 </html>
