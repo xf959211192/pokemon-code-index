@@ -30,32 +30,30 @@
 <body>
   <main>
     <h1>兑换码管理</h1>
-    <p class="sub">当前版本已取消后台 Token 校验。这个页面可直接刷新、回填、测试帖子和手动写入。公网部署时请注意：任何知道后台地址的人都可能改写数据。</p>
+    <p class="sub">当前版本已取消后台 Token 校验。这个页面可直接刷新、测试帖子和手动写入。代码中不再固定任何兑换码。</p>
 
     <section class="card">
       <a class="button" href="/">返回首页</a>
       <button id="checkHealth" class="secondary">检查服务状态</button>
-      <button id="seedKnown" class="secondary">回填内置历史码</button>
-      <button id="runDiscovery" class="secondary">查看内置发现信息</button>
-      <button id="backfillRecent" class="secondary">回填最近记录</button>
+      <button id="runDiscovery" class="secondary">查看已知帖子</button>
       <button id="reloadAll" class="secondary">刷新后台数据</button>
       <div class="warn">后台接口已公开：/api/admin/manual、/api/admin/refresh、/api/admin/sources/toggle 等不再要求 Authorization。</div>
     </section>
 
     <div class="grid">
       <section class="card">
-        <h2>强制刷新</h2>
-        <p class="sub">留空时优先使用内置确认码和已知月度帖。填写后，直接抓取指定 LINUX DO 公开帖子。</p>
-        <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/2504318" /></label>
+        <h2>按帖子识别</h2>
+        <p class="sub">填写 LINUX DO 当月公开帖子地址，系统会读取评论区并尝试提取社区共识。留空时使用当前月份的已知帖子地址。</p>
+        <label>指定 LINUX DO 帖子地址（可选）<input id="topicUrl" placeholder="https://linux.do/t/topic/xxxxxxx" /></label>
         <button id="testTopic" class="secondary">测试帖子识别</button>
         <button id="refresh">立即刷新</button>
       </section>
 
       <section class="card">
         <h2>手动补录</h2>
-        <label>月份（可留空，默认当月）<input id="period" placeholder="2026-07" /></label>
-        <label>兑换码<input id="code" placeholder="小火马" /></label>
-        <label>公开来源地址（可选）<input id="sourceUrl" placeholder="https://linux.do/t/topic/2504318" /></label>
+        <label>月份（可留空，默认当月）<input id="period" placeholder="2026-08" /></label>
+        <label>兑换码<input id="code" placeholder="下个月兑换码" /></label>
+        <label>公开来源地址（可选）<input id="sourceUrl" placeholder="https://linux.do/t/topic/xxxxxxx" /></label>
         <button id="manual">写入并确认</button>
       </section>
     </div>
@@ -86,7 +84,7 @@
     </section>
 
     <section class="card">
-      <h2>搜索发现</h2>
+      <h2>已知帖子</h2>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>类型</th><th>查询</th><th>用途</th></tr></thead>
@@ -300,18 +298,8 @@
       catch (error) { output({ ok: false, message: error.message }); }
     });
 
-    el("seedKnown").addEventListener("click", async () => {
-      try { await post("/api/seed-known", {}); }
-      finally { await reloadAll(); }
-    });
-
     el("runDiscovery").addEventListener("click", async () => {
       try { await post("/api/admin/discover", {}); }
-      finally { await reloadAll(); }
-    });
-
-    el("backfillRecent").addEventListener("click", async () => {
-      try { await post("/api/admin/backfill-recent", { months: 5 }); }
       finally { await reloadAll(); }
     });
 
