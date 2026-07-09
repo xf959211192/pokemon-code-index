@@ -6,7 +6,6 @@ import oldWorker, {
   periodOf
 } from "./index.js";
 
-const POKEMON_PROVIDER_KEY = "pokemon_nebula";
 const KNOWN_TOPIC_GRACE_DAY = 14;
 
 const KNOWN_LINUXDO_TOPICS = {
@@ -33,6 +32,38 @@ const KNOWN_LINUXDO_TOPICS = {
 };
 
 const KNOWN_VERIFIED_CODES = {
+  "2026-03": {
+    code: "a732f321-8939-43cc-97b8-e2af81487dab",
+    sourceUrl: "https://t.me/s/linux_do_channel?after=315051",
+    sourceTitle: "LINUX DO 公开 Telegram 镜像",
+    confidence: 0.62,
+    evidenceCount: 1,
+    evidence: "公开镜像记录三月宝可梦机场兑换码。"
+  },
+  "2026-04": {
+    code: "雷丘",
+    sourceUrl: "https://linux.do/t/topic/1876094",
+    sourceTitle: "LINUX DO 四月月度帖社区共识",
+    confidence: 0.92,
+    evidenceCount: 8,
+    evidence: "LINUX DO 四月月度帖评论区多次出现“雷丘”，并有续费成功反馈。"
+  },
+  "2026-05": {
+    code: "金鱼王",
+    sourceUrl: "https://linux.do/t/topic/2092025",
+    sourceTitle: "LINUX DO 五月月度帖社区共识",
+    confidence: 0.94,
+    evidenceCount: 10,
+    evidence: "LINUX DO 五月月度帖评论区多次出现“金鱼王”。"
+  },
+  "2026-06": {
+    code: "火焰鸟",
+    sourceUrl: "https://linux.do/t/topic/2289939",
+    sourceTitle: "LINUX DO 六月月度帖社区共识",
+    confidence: 0.96,
+    evidenceCount: 10,
+    evidence: "LINUX DO 六月月度帖评论区多次出现“火焰鸟”，并有成功续费反馈。"
+  },
   "2026-07": {
     code: "小火马",
     sourceUrl: "https://linux.do/t/topic/2504318",
@@ -57,26 +88,58 @@ function inKnownTopicGraceWindow(date = new Date()) {
   return day >= 1 && day <= KNOWN_TOPIC_GRACE_DAY;
 }
 
-function constantTimeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let index = 0; index < a.length; index += 1) diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  return diff === 0;
-}
-
-function authorized(request, env) {
-  const expected = env.ADMIN_TOKEN ? `Bearer ${env.ADMIN_TOKEN}` : "";
-  const actual = request.headers.get("Authorization") ?? "";
-  if (!expected || actual.length !== expected.length) return false;
-  return constantTimeEqual(actual, expected);
-}
-
 async function body(request) {
   try {
     return await request.json();
   } catch {
     return {};
   }
+}
+
+function safeUrl(value) {
+  if (!value) return null;
+  const url = new URL(String(value).trim());
+  if (url.protocol !== "https:") throw new Error("来源地址必须使用 HTTPS");
+  return url.toString();
+}
+
+function normalizeManualTopicUrl(topicUrl) {
+  const value = String(topicUrl ?? "").trim();
+  if (!value) return null;
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("指定帖子仅支持 https://linux.do 地址");
+  return value;
+}
+
+function plausibleCode(value) {
+  const code = String(value ?? "").trim();
+  return Boolean(
+    code &&
+    /^([\u4e00-\u9fa5]{2,8}|[A-Za-z0-9_-]{3,64}|[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12})$/.test(code) &&
+    !/(感谢|谢谢|支持|大佬|佬友|前排|优惠|兑换|白嫖|礼品|套餐|使用|输入|官网|备用|机场|免费|成功|失败|快乐|答案|正确|这个|那个|来了)/.test(code)
+  );
+}
+
+function hashText(value = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function rankStatus(status = "") {
+  const ranks = {
+    candidate: 1,
+    unknown: 1,
+    reported: 2,
+    corroborated: 3,
+    official_notice: 4,
+    checkout_verified: 5,
+    expired: 0
+  };
+  return ranks[status] ?? 1;
 }
 
 async function hasVerifiedCode(env, period) {
@@ -95,19 +158,6 @@ async function sourceCheck(env, period, result, message, candidateCount = 0, sou
   await env.DB.prepare(
     `INSERT INTO source_checks(source_key, period, result, message, source_url, candidate_count) VALUES (?, ?, ?, ?, ?, ?)`
   ).bind("linuxdo_monthly_topic", period, result, message, sourceUrl, candidateCount).run();
-}
-
-function rankStatus(status = "") {
-  const ranks = {
-    candidate: 1,
-    unknown: 1,
-    reported: 2,
-    corroborated: 3,
-    official_notice: 4,
-    checkout_verified: 5,
-    expired: 0
-  };
-  return ranks[status] ?? 1;
 }
 
 async function recordEvidence(env, evidence) {
@@ -179,6 +229,28 @@ async function tryRecordEvidence(env, evidence) {
   }
 }
 
+function manualEvidence(period, item, reviewer = "open_admin") {
+  const sourceUrl = item.sourceUrl ? safeUrl(item.sourceUrl) : "https://pokemon-code-index.xf959211192.workers.dev/admin.html";
+  const evidenceExcerpt = item.evidence || "后台手动补录";
+  return {
+    providerKey: "pokemon_nebula",
+    period,
+    code: item.code,
+    sourceKey: item.sourceKey ?? "manual_admin",
+    sourceType: item.sourceType ?? "manual",
+    sourceUrl,
+    referenceUrl: item.referenceUrl ?? item.sourceUrl ?? null,
+    isOfficial: 0,
+    status: item.status ?? "checkout_verified",
+    confidenceScore: item.confidenceScore ?? 90,
+    evidenceExcerpt,
+    evidenceHash: hashText(["pokemon_nebula", period, item.code, sourceUrl, evidenceExcerpt].join("|")),
+    extractionMethod: item.extractionMethod ?? "manual_entry",
+    verificationMethod: item.verificationMethod ?? "open_admin_write",
+    reviewer
+  };
+}
+
 async function saveCandidate(env, period, item) {
   await env.DB.prepare(`
     INSERT INTO code_candidates(period, code, source_key, source_name, source_type, source_url, confidence, evidence_count, evidence, updated_at)
@@ -200,13 +272,13 @@ async function saveCandidate(env, period, item) {
     item.evidence
   ).run();
 
-  await tryRecordEvidence(env, evidenceFromCandidate(period, item));
+  await tryRecordEvidence(env, item.sourceKey === "manual_admin" ? manualEvidence(period, item) : evidenceFromCandidate(period, item));
 }
 
-async function upsertVerifiedCode(env, period, item) {
+async function upsertVerifiedCode(env, period, item, status = "verified") {
   await env.DB.prepare(`
     INSERT INTO codes(period, code, status, confidence, evidence_count, source_url, source_title, updated_at)
-    VALUES (?, ?, 'verified', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(period) DO UPDATE SET
       code = excluded.code,
       status = excluded.status,
@@ -218,6 +290,7 @@ async function upsertVerifiedCode(env, period, item) {
   `).bind(
     period,
     item.code,
+    status,
     item.confidence,
     item.evidenceCount,
     item.sourceUrl,
@@ -254,7 +327,7 @@ function knownCodeCandidate(period) {
 
 async function seedKnownVerifiedCode(env, period, triggerType = "known_code_seed") {
   const seed = KNOWN_VERIFIED_CODES[period];
-  if (!seed) return { ok: false, seeded: false, reason: "no_known_code" };
+  if (!seed) return { ok: false, seeded: false, reason: "no_known_code", period };
   if (await hasVerifiedCode(env, period)) return { ok: true, seeded: false, skipped: true, reason: "already_verified", period };
 
   const item = knownCodeCandidate(period);
@@ -289,6 +362,18 @@ async function seedKnownVerifiedCode(env, period, triggerType = "known_code_seed
   };
 }
 
+async function seedAllKnownVerifiedCodes(env, triggerType = "known_code_seed_all") {
+  const results = [];
+  for (const period of Object.keys(KNOWN_VERIFIED_CODES).sort()) {
+    try {
+      results.push(await seedKnownVerifiedCode(env, period, triggerType));
+    } catch (error) {
+      results.push({ ok: false, period, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { ok: results.some((item) => item.ok), results };
+}
+
 async function seedCurrentKnownCodeIfNeeded(env, triggerType) {
   try {
     return await seedKnownVerifiedCode(env, periodOf(), triggerType);
@@ -298,12 +383,43 @@ async function seedCurrentKnownCodeIfNeeded(env, triggerType) {
   }
 }
 
-function normalizeManualTopicUrl(topicUrl) {
-  const value = String(topicUrl ?? "").trim();
-  if (!value) return null;
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.hostname !== "linux.do") throw new Error("指定帖子仅支持 https://linux.do 地址");
-  return value;
+async function manual(env, data) {
+  const period = /^\d{4}-\d{2}$/.test(data.period ?? "") ? data.period : periodOf();
+  const code = String(data.code ?? "").trim();
+  if (!plausibleCode(code)) throw new Error("兑换码格式不正确");
+  const sourceUrl = data.sourceUrl ? safeUrl(data.sourceUrl) : null;
+  const item = {
+    code,
+    sourceKey: "manual_admin",
+    sourceName: "开放后台手动补录",
+    sourceType: "manual",
+    sourceUrl: sourceUrl ?? "https://pokemon-code-index.xf959211192.workers.dev/admin.html",
+    confidence: 1,
+    evidenceCount: 1,
+    evidence: "开放后台手动补录并确认",
+    sourceTitle: "开放后台手动确认"
+  };
+  await saveCandidate(env, period, item);
+  await upsertVerifiedCode(env, period, item);
+  await log(env, period, "manual_write_open_admin", "updated", `开放后台写入 ${period} 兑换码：${code}`, sourceUrl);
+  return { ok: true, period, code };
+}
+
+async function testTopic(data) {
+  const topicUrl = String(data.topicUrl ?? "").trim();
+  if (!topicUrl) throw new Error("请先填写 LINUX DO 帖子地址");
+  const topic = await fetchTopic(topicUrl);
+  const candidate = communityCandidate(topic);
+  return {
+    ok: true,
+    url: topic.url,
+    title: topic.title,
+    postCount: topic.posts.length,
+    candidate,
+    message: candidate
+      ? `读取评论 ${topic.posts.length} 条；社区候选：${candidate.code}；证据分数：${candidate.evidenceCount}`
+      : `读取评论 ${topic.posts.length} 条；没有提取出高可信社区答案`
+  };
 }
 
 function knownTopicFor(period) {
@@ -382,6 +498,63 @@ async function refreshKnownTopic(env, { force = false, triggerType = "manual_ref
   }
 }
 
+async function listCandidates(env, period) {
+  const { results } = await env.DB.prepare(`
+    SELECT period, code, source_key, source_name, source_type, source_url, confidence, evidence_count, evidence, updated_at
+    FROM code_candidates
+    WHERE period = ?
+    ORDER BY confidence DESC, evidence_count DESC, updated_at DESC
+  `).bind(period).all();
+  return results;
+}
+
+async function listOffers(env, period) {
+  const { results } = await env.DB.prepare(`
+    SELECT period, code, offer_type, discount_value, plan_name, status, confidence_score, source_count, first_seen_at, last_seen_at, last_verified_at, updated_at
+    FROM offers
+    WHERE period = ?
+    ORDER BY confidence_score DESC, source_count DESC, updated_at DESC
+  `).bind(period).all();
+  return results;
+}
+
+async function listEvidence(env, period) {
+  const { results } = await env.DB.prepare(`
+    SELECT period, code, source_key, source_type, source_url, reference_url, is_official, status, confidence_score, evidence_excerpt, extraction_method, verification_method, reviewer, created_at
+    FROM offer_evidence
+    WHERE period = ?
+    ORDER BY id DESC
+    LIMIT 80
+  `).bind(period).all();
+  return results;
+}
+
+async function listDiscovery(env, period) {
+  const planned = Object.entries(KNOWN_VERIFIED_CODES).map(([itemPeriod, item]) => ({
+    kind: "known_verified_code",
+    query: `${itemPeriod} ${item.code}`,
+    purpose: "内置公开确认码兜底"
+  }));
+  const { results } = await env.DB.prepare(`
+    SELECT period, discovery_kind, query, title, source_url, score, updated_at
+    FROM source_discoveries
+    WHERE period = ?
+    ORDER BY score DESC, updated_at DESC
+    LIMIT 80
+  `).bind(period).all();
+  return { planned, discovered: results };
+}
+
+async function listSources(env) {
+  const { results } = await env.DB.prepare(`
+    SELECT s.*, c.result AS last_result, c.message AS last_message, c.source_url AS last_source_url, c.created_at AS last_checked_at
+    FROM sources s
+    LEFT JOIN source_checks c ON c.id = (SELECT id FROM source_checks WHERE source_key = s.source_key ORDER BY id DESC LIMIT 1)
+    ORDER BY s.priority, s.id
+  `).all();
+  return results;
+}
+
 async function runOldScheduled(controller, env) {
   if (!oldWorker.scheduled) return;
   await oldWorker.scheduled(controller, env, { waitUntil: (promise) => promise });
@@ -390,26 +563,64 @@ async function runOldScheduled(controller, env) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const currentPeriod = periodOf();
+
+    if ((url.pathname === "/api/seed-known" || url.pathname === "/api/admin/backfill-recent") && ["GET", "POST"].includes(request.method)) {
+      return json(await seedAllKnownVerifiedCodes(env, url.pathname === "/api/seed-known" ? "public_seed_known" : "backfill_recent_open_admin"));
+    }
 
     if (url.pathname === "/api/latest" && request.method === "GET") {
       await seedCurrentKnownCodeIfNeeded(env, "public_latest_known_code_seed");
       return oldWorker.fetch(request, env, ctx);
     }
 
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      await seedAllKnownVerifiedCodes(env, "public_history_known_code_seed");
+      return oldWorker.fetch(request, env, ctx);
+    }
+
     if (url.pathname === "/api/admin/refresh" && request.method === "POST") {
-      if (!authorized(request, env)) return json({ ok: false, message: "管理员令牌错误" }, 401);
       const data = await body(request);
-      try {
-        const result = await refreshKnownTopic(env, {
-          force: true,
-          triggerType: "manual_refresh_v2",
-          topicUrl: data.topicUrl || null
-        });
-        if (result.fallbackToOld) return oldWorker.fetch(request, env, ctx);
-        return json(result, result.ok ? 200 : 422);
-      } catch (error) {
-        return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422);
-      }
+      const result = await refreshKnownTopic(env, {
+        force: true,
+        triggerType: "manual_refresh_open_admin",
+        topicUrl: data.topicUrl || null
+      });
+      if (result.fallbackToOld) return json(await seedAllKnownVerifiedCodes(env, "manual_refresh_open_admin_seed_all"));
+      return json(result, result.ok ? 200 : 422);
+    }
+
+    if (url.pathname === "/api/admin/test-topic" && request.method === "POST") {
+      try { return json(await testTopic(await body(request))); }
+      catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
+    }
+
+    if (url.pathname === "/api/admin/manual" && request.method === "POST") {
+      try { return json(await manual(env, await body(request))); }
+      catch (error) { return json({ ok: false, message: error instanceof Error ? error.message : String(error) }, 422); }
+    }
+
+    if (url.pathname === "/api/admin/logs" && request.method === "GET") {
+      return json({ items: (await env.DB.prepare(`SELECT period, trigger_type, result, message, source_url, created_at FROM refresh_logs ORDER BY id DESC LIMIT 40`).all()).results });
+    }
+
+    if (url.pathname === "/api/admin/candidates" && request.method === "GET") return json({ period: currentPeriod, items: await listCandidates(env, currentPeriod) });
+    if (url.pathname === "/api/admin/offers" && request.method === "GET") return json({ period: currentPeriod, items: await listOffers(env, currentPeriod) });
+    if (url.pathname === "/api/admin/evidence" && request.method === "GET") return json({ period: currentPeriod, items: await listEvidence(env, currentPeriod) });
+    if (url.pathname === "/api/admin/discovery" && request.method === "GET") return json({ period: currentPeriod, ...(await listDiscovery(env, currentPeriod)) });
+
+    if (url.pathname === "/api/admin/discover" && request.method === "POST") {
+      return json({ ok: true, period: currentPeriod, bestTopic: knownTopicFor(currentPeriod), knownCodes: KNOWN_VERIFIED_CODES });
+    }
+
+    if (url.pathname === "/api/admin/sources" && request.method === "GET") return json({ items: await listSources(env) });
+
+    if (url.pathname === "/api/admin/sources/toggle" && request.method === "POST") {
+      const data = await body(request);
+      const result = await env.DB.prepare(`UPDATE sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?`)
+        .bind(data.enabled ? 1 : 0, String(data.sourceKey ?? ""))
+        .run();
+      return json({ ok: Boolean(result.meta?.changes), sourceKey: data.sourceKey, enabled: Boolean(data.enabled) });
     }
 
     return oldWorker.fetch(request, env, ctx);
@@ -429,6 +640,8 @@ export default {
 export {
   KNOWN_LINUXDO_TOPICS,
   KNOWN_VERIFIED_CODES,
+  manual,
   refreshKnownTopic,
+  seedAllKnownVerifiedCodes,
   seedKnownVerifiedCode
 };
